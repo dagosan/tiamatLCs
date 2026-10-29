@@ -17,7 +17,6 @@
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
 
-import jakarta.annotation.PostConstruct;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.migration.JavaMigration;
 import org.rutebanken.tiamat.ext.era.locationcodes.api.LocationCodeController;
@@ -25,6 +24,7 @@ import org.rutebanken.tiamat.ext.era.locationcodes.db.migration.V1__CreateEraLoc
 import org.rutebanken.tiamat.ext.era.locationcodes.kg.SparqlKnowledgeGraph;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -42,10 +42,12 @@ import java.util.List;
  * "era-location-codes". Its tables have their own Flyway history
  * (ext_era_schema_version), like the Fintraffic extension, so they never mix
  * with Tiamat's migrations and upstream releases merge without conflicts.
+ * They are created once every bean exists, so after Tiamat's own Flyway run:
+ * on an empty database, Tiamat must find its schema still empty.
  */
 @Profile(LocationCodeController.PROFILE)
 @Configuration
-public class EraLocationCodesConfig {
+public class EraLocationCodesConfig implements SmartInitializingSingleton {
 
     private static final Logger logger = LoggerFactory.getLogger(EraLocationCodesConfig.class);
 
@@ -59,8 +61,8 @@ public class EraLocationCodesConfig {
         this.dataSource = dataSource;
     }
 
-    @PostConstruct
-    public void migrate() {
+    @Override
+    public void afterSingletonsInstantiated() {
         logger.info("Migrating the ERA location code tables ({} migrations)", MIGRATIONS.size());
         Flyway.configure()
                 .dataSource(dataSource)
