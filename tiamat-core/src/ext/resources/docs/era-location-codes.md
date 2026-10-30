@@ -1,9 +1,10 @@
-<!-- Added for the ERA location code register, 2026-10-29. Licensed under the EUPL 1.2. -->
+<!-- Added for the ERA Location Code Manager, 2026-10-29. Licensed under the EUPL 1.2. -->
 
-# ERA location code register
+# ERA Location Code Manager: the register in Tiamat
 
-Tiamat hosts the location code register of the abzuKG frontend
-(https://github.com/dagosan/abzuKG, `src/rinf/locationCodes`): the requests for
+Tiamat hosts the location code register of ERA's Location Code Manager, the
+frontend built on Abzu (https://github.com/dagosan/abzuKG,
+`src/rinf/locationCodes`): the requests for
 primary and subsidiary location codes (PLC, SLC), the register of assigned codes
 with their history, and the yearly counters behind request references
 (LC-2026-0001).

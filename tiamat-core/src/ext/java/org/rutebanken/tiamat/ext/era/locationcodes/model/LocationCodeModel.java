@@ -12,7 +12,7 @@
  * See the Licence for the specific language governing permissions and
  * limitations under the Licence.
  *
- * Added for the ERA location code register, 2026-10-29.
+ * Added for the ERA Location Code Manager, 2026-10-29.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.model;
