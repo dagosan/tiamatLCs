@@ -1,0 +1,46 @@
+# Added for the ERA Location Code Manager, 2026-10-30. Licensed under the EUPL 1.2.
+#
+# Builds Tiamat from source and runs it with the ERA location code register
+# (profile era-location-codes, see tiamat-core/src/ext/resources/docs/era-location-codes.md).
+# Unlike tiamat-app/Dockerfile, it needs no jar built beforehand, so a server
+# with only Docker can build it:
+#
+#   docker build -f Dockerfile.era -t tiamat-era .
+#
+# The database and the rest come from the environment; see abzuKG
+# deploy/README.md ("Location code register") for the full stack.
+
+# --- Build: JDK 25 (Liberica, as tiamat-app's jib base) and Maven ---------
+FROM bellsoft/liberica-openjdk-debian:25 AS build
+ARG MAVEN_VERSION=3.9.11
+ADD https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz /tmp/maven.tar.gz
+RUN tar xzf /tmp/maven.tar.gz -C /opt && rm /tmp/maven.tar.gz \
+ && ln -s /opt/apache-maven-${MAVEN_VERSION}/bin/mvn /usr/local/bin/mvn
+WORKDIR /src
+COPY . .
+# Tests are skipped here (they need Docker for Testcontainers); run them with
+# `mvn -pl tiamat-core verify` on a development machine.
+RUN mvn -B -ntp -pl tiamat-app -am package -Dmaven.test.skip=true -Djacoco.skip=true
+
+# --- Run: same JRE as tiamat-app/Dockerfile --------------------------------
+FROM bellsoft/liberica-openjre-debian:25.0.5.0.3-5
+WORKDIR /deployments
+COPY --from=build /src/tiamat-app/target/tiamat.jar tiamat.jar
+RUN addgroup --gid 2000 appuser && adduser --uid 2000 --disabled-password --ingroup appuser appuser
+RUN mkdir -p /deployments/data && chown -R appuser:appuser /deployments/data
+USER appuser
+
+# Local blob storage and changelog (no cloud services), plus the register.
+ENV SPRING_PROFILES_ACTIVE=local-blobstore,local-changelog,era-location-codes \
+    BLOBSTORE_LOCAL_FOLDER=/deployments/data/export \
+    ASYNC_EXPORT_PATH=/deployments/data \
+    SPRING_CLOUD_GCP_PUBSUB_ENABLED=false \
+    JAVA_MEMORY=-Xmx1500m \
+    SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWKSETURI=http://localhost/no-login-configured
+# Tiamat's security config needs a JWT decoder bean even though every request
+# is permitted; the key set above is only fetched if a request carries a
+# token, which the Location Code Manager doesn't send until there is a login.
+# Replace it with the OIDC provider's key set (or issuer-uri) when adding login.
+EXPOSE 8777
+# JVM options as in tiamat-app's spring-boot-maven-plugin configuration.
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_MEMORY --add-modules java.se --add-exports java.base/jdk.internal.ref=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.management/sun.management=ALL-UNNAMED --add-opens jdk.management/com.sun.management.internal=ALL-UNNAMED -jar tiamat.jar"]

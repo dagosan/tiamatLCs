@@ -1,5 +1,5 @@
 <!-- Added for the ERA Location Code Manager, 2026-10-29. Licensed under the EUPL 1.2.
-     Modified 2026-10-30: the register takes the workflow steps itself. -->
+     Modified 2026-10-30: the register takes the workflow steps itself; Docker image (Dockerfile.era). -->
 
 # ERA Location Code Manager: the register in Tiamat
 
@@ -91,6 +91,15 @@ migrations. Without the profile, nothing of this is loaded.
 | `era.location-codes.kg.timeout-seconds` | `20` | per question; each takes about 0.5 s |
 
 The KG client uses the JVM's proxy settings (`-Dhttps.proxyHost=…`).
+
+### In Docker
+
+`Dockerfile.era` (repository root) builds Tiamat from source and starts it with
+this profile, local blob storage and the local changelog, so a server with only
+Docker can run it; the database comes from `SPRING_DATASOURCE_URL`,
+`_USERNAME` and `_PASSWORD`. abzuKG's `deploy/` runs it together with
+PostGIS and the Location Code Manager, which reaches the register through its
+own web server at `/era/v1/location-codes` (abzuKG `deploy/README.md`).
 
 ## API
 
