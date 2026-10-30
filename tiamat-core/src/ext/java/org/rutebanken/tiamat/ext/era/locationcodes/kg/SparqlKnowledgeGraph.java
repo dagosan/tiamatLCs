@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-10-30: subsidiaryCodes, a SELECT query.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.kg;
@@ -26,10 +27,16 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Pattern;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import org.rutebanken.tiamat.ext.era.locationcodes.JsonDocuments;
+
 /**
- * Asks the ERA SPARQL endpoint (GraphDB, rinf-plus) with ASK queries. Each
+ * Asks the ERA SPARQL endpoint (GraphDB, rinf-plus), mostly with ASK queries. Each
  * takes about half a second (measured 2026-10-29). Plain JDK HTTP client, so
  * no new dependency.
  */
@@ -76,11 +83,39 @@ public class SparqlKnowledgeGraph implements KnowledgeGraph {
                 + "              era:subsidiaryLocationCode " + literal(subsidiaryCode) + " }");
     }
 
+    @Override
+    public List<String> subsidiaryCodes(String primaryCode) {
+        String answer = send("SELECT DISTINCT ?code WHERE {\n"
+                + "  ?location era:primaryLocationCode " + literal(primaryCode) + " .\n"
+                + "  ?subsidiary era:linkedToPrimaryLocation ?location ;\n"
+                + "              era:subsidiaryLocationCode ?code .\n}", "application/sparql-results+json");
+        List<String> codes = new ArrayList<>();
+        try {
+            for (JsonNode row : JsonDocuments.MAPPER.readTree(answer).path("results").path("bindings")) {
+                codes.add(row.path("code").path("value").asText());
+            }
+        } catch (JsonProcessingException e) {
+            throw new KnowledgeGraphUnavailableException("Unexpected KG answer: " + abbreviate(answer));
+        }
+        return codes;
+    }
+
     boolean ask(String query) {
+        String answer = send(query, "text/boolean").trim();
+        if (answer.equalsIgnoreCase("true")) {
+            return true;
+        }
+        if (answer.equalsIgnoreCase("false")) {
+            return false;
+        }
+        throw new KnowledgeGraphUnavailableException("Unexpected KG answer: " + abbreviate(answer));
+    }
+
+    private String send(String query, String accept) {
         String body = "query=" + URLEncoder.encode(PREFIXES + query, StandardCharsets.UTF_8);
         HttpRequest request = HttpRequest.newBuilder(endpoint)
                 .timeout(timeout)
-                .header("Accept", "text/boolean")
+                .header("Accept", accept)
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
@@ -96,14 +131,7 @@ public class SparqlKnowledgeGraph implements KnowledgeGraph {
         if (response.statusCode() != 200) {
             throw new KnowledgeGraphUnavailableException("KG answered HTTP " + response.statusCode());
         }
-        String answer = response.body().trim();
-        if (answer.equalsIgnoreCase("true")) {
-            return true;
-        }
-        if (answer.equalsIgnoreCase("false")) {
-            return false;
-        }
-        throw new KnowledgeGraphUnavailableException("Unexpected KG answer: " + abbreviate(answer));
+        return response.body();
     }
 
     static String iri(String value) {

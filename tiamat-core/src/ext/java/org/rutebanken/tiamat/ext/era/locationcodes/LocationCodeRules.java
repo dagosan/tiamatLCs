@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-10-30: the code patterns are public, for the workflow package.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -47,9 +48,9 @@ import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeMode
 public final class LocationCodeRules {
 
     /** ISO alpha-2 (or EU) plus five digits, as every PLC in the KG (TD 103 4.10.1). */
-    static final Pattern PRIMARY_CODE = Pattern.compile("^[A-Z]{2}[0-9]{5}$");
+    public static final Pattern PRIMARY_CODE = Pattern.compile("^[A-Z]{2}[0-9]{5}$");
     /** TSI LocationSubsidiaryCode: up to ten letters, digits, dots and hyphens ("NO-S.998"). */
-    static final Pattern SUBSIDIARY_CODE = Pattern.compile("^[A-Za-z0-9.\\-]{1,10}$");
+    public static final Pattern SUBSIDIARY_CODE = Pattern.compile("^[A-Za-z0-9.\\-]{1,10}$");
     private static final Pattern UNSAFE_IRI = Pattern.compile("[\\s<>\"{}|\\\\^`]");
 
     private LocationCodeRules() {

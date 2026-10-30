@@ -13,23 +13,41 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-10-30: the register takes the workflow steps itself (submit,
+ * takeStep) instead of storing documents the frontend computed.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeRules.Extension;
 import org.rutebanken.tiamat.ext.era.locationcodes.RegisterChecks.ParentState;
 import org.rutebanken.tiamat.ext.era.locationcodes.kg.KnowledgeGraphUnavailableException;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.Actor;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.AssignedCodes;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.NewRequests;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.Publication;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestRouting;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestTransitions;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.Step;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.StepPayloads;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.StepPermission;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowSteps;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -39,6 +57,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.Supplier;
 
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.BAD_REQUEST;
@@ -48,26 +67,37 @@ import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.UNPROCESSABLE;
 
 /**
- * The register: stores requests and codes as the frontend sends them, after
- * the checks in {@link LocationCodeRules} and {@link RegisterChecks}. Each
- * save is one transaction; a publication saves its codes and its request
- * together, so a code is never registered without the decision behind it.
+ * The register. It takes each workflow step itself: it checks that the step
+ * may be taken now, by this actor (workflow.StepPermission), works out what
+ * the step changes (workflow.RequestTransitions, workflow.Publication), and
+ * saves the result after the checks in {@link LocationCodeRules} and
+ * {@link RegisterChecks}. Each step is one transaction; a publication saves
+ * its codes and its request together, so a code is never registered without
+ * the decision behind it.
  */
 public class LocationCodeService {
 
-    private static final int FIRST_YEAR = 2000;
-    private static final int LAST_YEAR = 2999;
+    /** Same form as JavaScript's toISOString(), which the frontend writes. */
+    private static final DateTimeFormatter ISO_INSTANT_MILLIS =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private final LocationCodeRepository repository;
     private final TransactionTemplate transactions;
     /** Null when the Knowledge Graph checks are switched off. */
     private final RegisterChecks registerChecks;
+    private final Clock clock;
 
     public LocationCodeService(
             LocationCodeRepository repository, TransactionTemplate transactions, RegisterChecks registerChecks) {
+        this(repository, transactions, registerChecks, Clock.systemUTC());
+    }
+
+    public LocationCodeService(LocationCodeRepository repository, TransactionTemplate transactions,
+            RegisterChecks registerChecks, Clock clock) {
         this.repository = repository;
         this.transactions = transactions;
         this.registerChecks = registerChecks;
+        this.clock = clock;
     }
 
     public String requestsJson() {
@@ -95,37 +125,81 @@ public class LocationCodeService {
         return repository.changeLogJson(entity, key);
     }
 
-    public void saveRequest(String pathId, String json) {
-        JsonNode document = JsonDocuments.parse(json);
-        RequestEntry request = checkedRequest(pathId, document);
-        inTransaction(() -> writeRequest(request, document));
-    }
-
-    public void saveCodes(String json) {
-        List<JsonNode> documents = codeDocuments(JsonDocuments.parse(json));
-        inTransaction(() -> writeCodes(documents, Map.of()));
+    /**
+     * Procedure step 2: {"actor": …, "data": …}. The register gives the
+     * request its id and records the submission; returns the request.
+     */
+    public String submit(String json) {
+        JsonNode body = JsonDocuments.parse(json);
+        Actor actor = Actor.fromJson(body.path("actor"));
+        if (!Actor.REQUESTER.equals(actor.role())) {
+            throw refused(StepPermission.WRONG_ROLE);
+        }
+        if (!body.path("data").isObject()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidRequest", "data must be an object");
+        }
+        ObjectNode request = NewRequests.create(UUID.randomUUID().toString(), body.get("data"), actor, now());
+        RequestEntry entry = checkedRequest(null, request);
+        inTransaction(() -> writeRequest(entry, request));
+        return JsonDocuments.write(request);
     }
 
     /**
-     * A workflow step that also changes the register (publication): the codes
-     * and the request are saved together or not at all.
+     * One step on a request: {"action", "actor", "payload", "expectedEventCount"}.
+     * expectedEventCount is how many events the actor's copy has; if someone
+     * else took a step meanwhile, the step is refused (409 staleRequest).
+     * Returns {"request": …, "codes": [ register entries the step changed ]}.
      */
-    public void saveRequestWithCodes(String pathId, String json) {
+    public String takeStep(String pathId, String json) {
         JsonNode body = JsonDocuments.parse(json);
-        JsonNode document = body.path("request");
-        RequestEntry request = checkedRequest(pathId, document);
-        List<JsonNode> codes = codeDocuments(body.path("codes"));
-        inTransaction(() -> {
-            writeCodes(codes, Map.of(request.id(), request.operation()));
-            writeRequest(request, document);
-        });
-    }
-
-    public int nextReferenceSequence(int year) {
-        if (year < FIRST_YEAR || year > LAST_YEAR) {
-            throw new LocationCodeException(BAD_REQUEST, "invalidYear", "year " + year + " is out of range");
+        String step = JsonDocuments.text(body, "action");
+        if (!WorkflowSteps.isStep(step) || WorkflowSteps.SUBMIT.equals(step)) {
+            throw new LocationCodeException(BAD_REQUEST, "unknownAction", "unknown action \"" + step + "\"");
         }
-        return transactions.execute(status -> repository.nextReferenceSequence(year));
+        Actor actor = Actor.fromJson(body.path("actor"));
+        JsonNode payload = body.path("payload").isObject() ? body.get("payload") : JsonDocuments.MAPPER.createObjectNode();
+        JsonNode expectedEvents = body.path("expectedEventCount");
+        if (!expectedEvents.isIntegralNumber()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidAction", "expectedEventCount must be a whole number");
+        }
+        return inTransactionReturning(() -> {
+            JsonNode stored = repository.lockRequest(pathId).orElseThrow(() ->
+                    new LocationCodeException(NOT_FOUND, "requestNotFound", "no request " + pathId));
+            if (stored.path("events").size() != expectedEvents.asInt()) {
+                throw new LocationCodeException(CONFLICT, "staleRequest",
+                        "request " + pathId + " was changed by someone else; reload it and take the step again");
+            }
+            Instant instant = clock.instant();
+            String now = ISO_INSTANT_MILLIS.format(instant);
+            LocalDate today = LocalDate.ofInstant(instant, ZoneOffset.UTC);
+            StepPermission.refusal(stored, step, actor, today).ifPresent(reason -> {
+                throw refused(reason);
+            });
+            List<String> payloadProblems = StepPayloads.problems(stored, step, payload);
+            if (!payloadProblems.isEmpty()) {
+                throw new LocationCodeException(BAD_REQUEST, "invalidPayload", payloadProblems);
+            }
+            if (WorkflowSteps.ASSIGN.equals(step)) {
+                requireAssignable(stored, JsonDocuments.text(payload, "code"));
+            }
+            String reference = WorkflowSteps.REGISTER.equals(step)
+                    ? NewRequests.reference(today.getYear(), repository.nextReferenceSequence(today.getYear()))
+                    : null;
+            ObjectNode updated = RequestTransitions.apply(stored, new Step(step, actor, payload, now, reference));
+            RequestEntry entry = checkedRequest(pathId, updated);
+            ArrayNode codes = JsonDocuments.MAPPER.createArrayNode();
+            if (WorkflowSteps.PUBLISH.equals(step)) {
+                codes.addAll(publicationChanges(updated, today, now));
+            }
+            if (!codes.isEmpty()) {
+                writeCodes(codeDocuments(codes), Map.of(entry.id(), entry.operation()));
+            }
+            writeRequest(entry, updated);
+            ObjectNode result = JsonDocuments.MAPPER.createObjectNode();
+            result.set("request", updated);
+            result.set("codes", codes);
+            return JsonDocuments.write(result);
+        });
     }
 
     /** Everything the register holds, in the frontend's backup format. */
@@ -190,6 +264,52 @@ public class LocationCodeService {
             return "{\"requestsAdded\":" + requestsAdded + ",\"requestsSkipped\":" + (requests.size() - requestsAdded)
                     + ",\"codesAdded\":" + codesAdded + ",\"codesSkipped\":" + (codes.size() - codesAdded) + "}";
         });
+    }
+
+    /** A value assigned once: well formed, and for a new code not in the register already. */
+    private void requireAssignable(JsonNode request, String code) {
+        List<String> problems = new ArrayList<>(AssignedCodes.problems(request, code));
+        boolean creation = RequestRouting.isCreation(JsonDocuments.text(request.path("data"), "operation"));
+        String key = AssignedCodes.keyOf(request, code);
+        if (problems.isEmpty() && creation && repository.lockCode(key).isPresent()) {
+            problems.add(key + " is already in the register");
+        }
+        if (!problems.isEmpty()) {
+            throw new LocationCodeException(UNPROCESSABLE, "codeNotAssignable", problems);
+        }
+    }
+
+    /** The register entries a publication creates or changes, with the SLCs it closes. */
+    private List<ObjectNode> publicationChanges(JsonNode request, LocalDate today, String now) {
+        Optional<String> parent = Publication.parentWhoseDependantsClose(request);
+        List<JsonNode> activeSubsidiaries = new ArrayList<>();
+        List<String> kgSubsidiaryCodes = List.of();
+        if (parent.isPresent()) {
+            JsonDocuments.parse(repository.codesJson(null, parent.get(), today.toString()))
+                    .forEach(activeSubsidiaries::add);
+            if (registerChecks != null) {
+                try {
+                    kgSubsidiaryCodes = registerChecks.subsidiaryCodesInKg(parent.get());
+                } catch (KnowledgeGraphUnavailableException e) {
+                    throw new LocationCodeException(UNAVAILABLE, "knowledgeGraphUnavailable",
+                            "the Knowledge Graph did not answer, so the SLCs of " + parent.get()
+                                    + " could not be listed; nothing was saved (" + e.getMessage() + ")");
+                }
+            }
+        }
+        return Publication.registerChanges(request, repository::lockCode, activeSubsidiaries, kgSubsidiaryCodes, now);
+    }
+
+    /** A step the actor may not take now: 409 when the request has moved on, 422 otherwise. */
+    private static LocationCodeException refused(String reason) {
+        if (StepPermission.WRONG_STATUS.equals(reason)) {
+            return new LocationCodeException(CONFLICT, "actionNotAvailable", reason);
+        }
+        return new LocationCodeException(UNPROCESSABLE, "actionNotAllowed", reason);
+    }
+
+    private String now() {
+        return ISO_INSTANT_MILLIS.format(clock.instant());
     }
 
     private void writeRequest(RequestEntry request, JsonNode document) {

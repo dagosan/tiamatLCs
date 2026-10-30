@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-10-30: rinfLink is public, for the workflow package.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -98,7 +99,7 @@ public final class JsonDocuments {
         return events;
     }
 
-    static RinfLink rinfLink(JsonNode node) {
+    public static RinfLink rinfLink(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) {
             return null;
         }

@@ -13,6 +13,8 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-10-30: requests change only through POST /requests (submit)
+ * and POST /requests/{id}/actions (one step); the raw saves are gone.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.api;
@@ -24,13 +26,13 @@ import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -38,8 +40,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * REST API of the location code register, one endpoint per method of the
- * frontend's LocationCodeStore (abzuKG, src/rinf/locationCodes/store). Bodies
- * are the frontend's own JSON documents, passed through as text.
+ * frontend's LocationCodeStore (abzuKG, src/rinf/locationCodes/store). The
+ * register takes each workflow step itself; documents are passed as text.
  */
 @Profile(LocationCodeController.PROFILE)
 @RestController
@@ -67,18 +69,20 @@ public class LocationCodeController {
         return service.requestJson(id);
     }
 
-    /** Creates or replaces a request; a replacement must add events to the stored ones. */
-    @PutMapping(value = "/requests/{id}", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<String> saveRequest(@PathVariable String id, @RequestBody String body) {
-        service.saveRequest(id, body);
-        return ResponseEntity.noContent().build();
+    /** Submits a request: {"actor": {"name", "role": "requester"}, "data": …}; returns it with its id (201). */
+    @PostMapping(value = "/requests", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<String> submit(@RequestBody String body) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(service.submit(body));
     }
 
-    /** A step that changes the register too: {"request": …, "codes": […]}, saved together. */
-    @PutMapping(value = "/requests/{id}/with-codes", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<String> saveRequestWithCodes(@PathVariable String id, @RequestBody String body) {
-        service.saveRequestWithCodes(id, body);
-        return ResponseEntity.noContent().build();
+    /**
+     * Takes one step: {"action", "actor", "payload", "expectedEventCount"}.
+     * Returns {"request": …, "codes": […]}, the request after the step and the
+     * register entries it changed (a publication).
+     */
+    @PostMapping(value = "/requests/{id}/actions", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public String takeStep(@PathVariable String id, @RequestBody String body) {
+        return service.takeStep(id, body);
     }
 
     @GetMapping("/requests/{id}/changes")
@@ -109,19 +113,6 @@ public class LocationCodeController {
     @GetMapping("/codes/{primary}/changes")
     public String codeChanges(@PathVariable String primary) {
         return service.changeLogJson("code", primary);
-    }
-
-    /** Creates or replaces each code with the same key, all or none. */
-    @PutMapping(value = "/codes", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<String> saveCodes(@RequestBody String body) {
-        service.saveCodes(body);
-        return ResponseEntity.noContent().build();
-    }
-
-    /** Next request reference number of a year, starting at 1. */
-    @PostMapping("/reference-sequences/{year}/next")
-    public String nextReferenceSequence(@PathVariable int year) {
-        return "{\"year\":" + year + ",\"value\":" + service.nextReferenceSequence(year) + "}";
     }
 
     /** Everything, in the format of the frontend's backup file. */

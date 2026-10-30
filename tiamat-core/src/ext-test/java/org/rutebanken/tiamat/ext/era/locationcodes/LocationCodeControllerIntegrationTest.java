@@ -13,10 +13,12 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-10-30: requests change through submit and steps, not raw saves.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.Test;
 import org.rutebanken.tiamat.TiamatIntegrationTest;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,13 +33,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 
-import java.util.UUID;
-
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The register through HTTP, on the test database. The Knowledge Graph checks
- * are off here (no network in CI); RegisterChecksTest covers them.
+ * are off here (no network in CI); RegisterChecksTest covers them, and the
+ * workflow tests cover each rule.
  */
 @ActiveProfiles("era-location-codes")
 @TestPropertySource(properties = "era.location-codes.kg.checks-enabled=false")
@@ -45,83 +46,109 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class LocationCodeControllerIntegrationTest extends TiamatIntegrationTest {
 
     private static final String BASE = "/era/v1/location-codes";
+    private static final int UNPROCESSABLE = 422;
+    private static final String ANNA = "{\"name\":\"Anna\",\"role\":\"requester\"}";
+    private static final String CARL = "{\"name\":\"Carl\",\"role\":\"codeAdministrator\"}";
+    private static final String RITA = "{\"name\":\"Rita\",\"role\":\"rinfCorrespondent\"}";
+    private static final String VERA = "{\"name\":\"Vera\",\"role\":\"validatingOfficer\"}";
 
     @Autowired
     private TestRestTemplate rest;
 
-    private static String request(String id, String status, int events) {
-        StringBuilder list = new StringBuilder();
-        for (int index = 0; index < events; index++) {
-            list.append(index == 0 ? "" : ",").append("{\"at\":\"2026-10-29T10:0").append(index)
-                    .append(":00Z\",\"actor\":{\"role\":\"requester\",\"name\":\"A\"},\"action\":\"a")
-                    .append(index).append("\",\"note\":\"\"}");
-        }
-        return "{\"id\":\"" + id + "\",\"reference\":null,\"status\":\"" + status + "\","
-                + "\"data\":{\"operation\":\"newCode\",\"codeType\":\"primary\",\"country\":\"SE\"},"
-                + "\"submittedAt\":\"2026-10-29T10:00:00Z\",\"submittedBy\":\"A\",\"events\":[" + list + "]}";
-    }
+    private static final String DATA = "{\"operation\":\"newCode\",\"codeType\":\"primary\",\"country\":\"SE\","
+            + "\"proposedCode\":\"\",\"targetCode\":\"\",\"locationName\":\"Test\",\"imOrganisationCode\":\"0074\","
+            + "\"rinfLink\":{\"kind\":\"operationalPoint\",\"canonicalId\":\"SE00111\",\"label\":\"Myrbacken\"},"
+            + "\"parentPrimaryCode\":\"\",\"subsidiaryTypeCode\":\"\",\"effectiveDate\":\"\","
+            + "\"closeDependentCodes\":false,\"legacyCodingRange\":false,\"justification\":\"\",\"language\":\"en\","
+            + "\"requester\":{\"name\":\"Anna\",\"organisation\":\"X\",\"organisationCode\":\"1234\","
+            + "\"category\":\"railwayUndertaking\",\"email\":\"a@x.eu\"},\"preSubmissionConfirmed\":true}";
 
-    private static String code(String plc, String requestId) {
-        return "{\"key\":\"" + plc + "\",\"codeType\":\"primary\",\"code\":\"" + plc + "\",\"parentPrimaryCode\":null,"
-                + "\"country\":\"" + plc.substring(0, 2) + "\",\"name\":\"Test\",\"rinfLink\":"
-                + "{\"kind\":\"operationalPoint\",\"canonicalId\":\"SE00111\"},\"validFrom\":\"2026-10-29\","
-                + "\"closedFrom\":null,\"history\":[{\"at\":\"2026-10-29T12:00:00Z\",\"requestId\":\"" + requestId
-                + "\",\"reference\":null,\"change\":\"assigned\"}]}";
-    }
-
-    private ResponseEntity<String> put(String path, String body) {
+    private ResponseEntity<String> post(String path, String body) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        return rest.exchange(BASE + path, HttpMethod.PUT, new HttpEntity<>(body, headers), String.class);
+        return rest.exchange(BASE + path, HttpMethod.POST, new HttpEntity<>(body, headers), String.class);
+    }
+
+    private String submit() {
+        ResponseEntity<String> created = post("/requests", "{\"actor\":" + ANNA + ",\"data\":" + DATA + "}");
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        return JsonDocuments.parse(created.getBody()).get("id").asText();
+    }
+
+    private int eventCount(String id) {
+        return JsonDocuments.parse(rest.getForObject(BASE + "/requests/" + id, String.class)).get("events").size();
+    }
+
+    private ResponseEntity<String> step(String id, String action, String actor, String payload, int expectedEvents) {
+        return post("/requests/" + id + "/actions", "{\"action\":\"" + action + "\",\"actor\":" + actor
+                + ",\"payload\":" + payload + ",\"expectedEventCount\":" + expectedEvents + "}");
+    }
+
+    private ResponseEntity<String> step(String id, String action, String actor, String payload) {
+        return step(id, action, actor, payload, eventCount(id));
+    }
+
+    /** Submitted, registered, checked, validated and positioned: awaiting a decision. */
+    private String awaitingDecision() {
+        String id = submit();
+        step(id, "register", CARL, "{}");
+        step(id, "runChecks", CARL, "{\"checks\":[{\"item\":\"noDuplicate\",\"outcome\":\"pass\"}],\"assignableCode\":null}");
+        step(id, "completeValidation", CARL, "{}");
+        step(id, "confirmPosition", RITA, "{}");
+        return id;
     }
 
     @Test
-    public void storesARequestAndRefusesAStaleCopy() {
-        String id = UUID.randomUUID().toString();
-        assertThat(put("/requests/" + id, request(id, "submitted", 1)).getStatusCode())
-                .isEqualTo(HttpStatus.NO_CONTENT);
-        assertThat(put("/requests/" + id, request(id, "registered", 2)).getStatusCode())
-                .isEqualTo(HttpStatus.NO_CONTENT);
+    public void takesStepsAndRefusesAStaleCopy() {
+        String id = submit();
+        ResponseEntity<String> registered = step(id, "register", CARL, "{\"reference\":\"LC-FAKE\"}", 1);
+        assertThat(registered.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode request = JsonDocuments.parse(registered.getBody()).get("request");
+        assertThat(request.get("status").asText()).isEqualTo("registered");
+        assertThat(request.get("reference").asText()).matches("LC-\\d{4}-\\d{4}");
 
-        ResponseEntity<String> stale = put("/requests/" + id, request(id, "rejected", 2));
+        ResponseEntity<String> stale = step(id, "returnInadmissible", CARL, "{}", 1);
         assertThat(stale.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(stale.getBody()).contains("\"error\":\"staleRequest\"");
-
-        ResponseEntity<String> stored = rest.getForEntity(BASE + "/requests/" + id, String.class);
-        assertThat(stored.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(stored.getBody()).contains("\"registered\"");
         assertThat(rest.getForObject(BASE + "/requests", String.class)).contains(id);
     }
 
     @Test
-    public void publishesCodesWithTheirRequestAndAssignsEachCodeOnce() {
-        String first = UUID.randomUUID().toString();
+    public void refusesAStepOutOfTurnOrInAnotherRole() {
+        String id = submit();
+        ResponseEntity<String> wrongRole = step(id, "register", VERA, "{}");
+        assertThat(wrongRole.getStatusCode().value()).isEqualTo(UNPROCESSABLE);
+        assertThat(wrongRole.getBody()).contains("rinf_lc_blocked_wrong_role");
+
+        ResponseEntity<String> outOfTurn = step(id, "publish", CARL, "{}");
+        assertThat(outOfTurn.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(outOfTurn.getBody()).contains("\"error\":\"actionNotAvailable\"");
+    }
+
+    @Test
+    public void publishesACodeWithItsRequestAndAssignsItOnce() {
         String plc = "SE" + String.format("%05d", (int) (Math.random() * 99_999));
-        ResponseEntity<String> published = put("/requests/" + first + "/with-codes",
-                "{\"request\":" + request(first, "published", 1) + ",\"codes\":[" + code(plc, first) + "]}");
-        assertThat(published.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        String first = awaitingDecision();
+        assertThat(step(first, "assign", VERA, "{\"code\":\"" + plc + "\"}").getStatusCode()).isEqualTo(HttpStatus.OK);
+        ResponseEntity<String> published = step(first, "publish", CARL, "{}");
+        assertThat(published.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(published.getBody()).contains("\"key\":\"" + plc + "\"");
         assertThat(rest.getForObject(BASE + "/codes/" + plc, String.class)).contains("\"SE00111\"");
 
-        String second = UUID.randomUUID().toString();
-        ResponseEntity<String> again = put("/requests/" + second + "/with-codes",
-                "{\"request\":" + request(second, "published", 1) + ",\"codes\":[" + code(plc, second) + "]}");
-        assertThat(again.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
-        assertThat(rest.getForEntity(BASE + "/requests/" + second, String.class).getStatusCode())
-                .isEqualTo(HttpStatus.NOT_FOUND);
+        String second = awaitingDecision();
+        ResponseEntity<String> again = step(second, "assign", VERA, "{\"code\":\"" + plc + "\"}");
+        assertThat(again.getStatusCode().value()).isEqualTo(UNPROCESSABLE);
+        assertThat(again.getBody()).contains("\"error\":\"codeNotAssignable\"");
     }
 
     @Test
-    public void refusesAMalformedCode() {
-        ResponseEntity<String> response = put("/codes", "[" + code("SE0001", "r") + "]");
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(response.getBody()).contains("two letters and five digits");
-    }
-
-    @Test
-    public void countsReferencesPerYear() {
-        String first = rest.postForObject(BASE + "/reference-sequences/2091/next", null, String.class);
-        String second = rest.postForObject(BASE + "/reference-sequences/2091/next", null, String.class);
-        assertThat(first).isEqualTo("{\"year\":2091,\"value\":1}");
-        assertThat(second).isEqualTo("{\"year\":2091,\"value\":2}");
+    public void noLongerAcceptsADocumentComputedByTheClient() {
+        String id = submit();
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> put = rest.exchange(BASE + "/requests/" + id, HttpMethod.PUT,
+                new HttpEntity<>("{\"id\":\"" + id + "\",\"status\":\"published\"}", headers), String.class);
+        assertThat(put.getStatusCode().is2xxSuccessful()).isFalse();
+        assertThat(eventCount(id)).isEqualTo(1);
     }
 }

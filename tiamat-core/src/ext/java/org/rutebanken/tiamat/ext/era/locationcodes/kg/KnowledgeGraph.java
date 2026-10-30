@@ -13,9 +13,12 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-10-30: subsidiaryCodes, for closing a PLC with its SLCs.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.kg;
+
+import java.util.List;
 
 /**
  * The questions the register asks ERA's Knowledge Graph before it accepts a
@@ -35,4 +38,7 @@ public interface KnowledgeGraph {
 
     /** A subsidiary location with this code is linked to the primary location with this PLC. */
     boolean subsidiaryCodeExists(String primaryCode, String subsidiaryCode);
+
+    /** The SLC values linked to the primary location with this PLC (closing a PLC with its SLCs). */
+    List<String> subsidiaryCodes(String primaryCode);
 }

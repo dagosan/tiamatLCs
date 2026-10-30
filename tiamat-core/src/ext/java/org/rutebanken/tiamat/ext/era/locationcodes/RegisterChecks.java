@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-10-30: subsidiaryCodesInKg, for closing a PLC with its SLCs.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -52,6 +53,11 @@ public class RegisterChecks {
 
     public RegisterChecks(KnowledgeGraph kg) {
         this.kg = kg;
+    }
+
+    /** SLC values the KG links to a PLC, for closing the PLC with its dependants. */
+    public List<String> subsidiaryCodesInKg(String primaryCode) {
+        return kg.subsidiaryCodes(primaryCode);
     }
 
     /**

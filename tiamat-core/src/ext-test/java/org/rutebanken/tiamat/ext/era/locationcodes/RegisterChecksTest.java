@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-10-30: the test KG answers subsidiaryCodes.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -61,6 +62,11 @@ class RegisterChecksTest {
         @Override
         public boolean subsidiaryCodeExists(String parent, String code) {
             return parent.equals("BE00438") && code.equals("0001");
+        }
+
+        @Override
+        public List<String> subsidiaryCodes(String parent) {
+            return parent.equals("BE00438") ? List.of("0001") : List.of();
         }
     };
 
