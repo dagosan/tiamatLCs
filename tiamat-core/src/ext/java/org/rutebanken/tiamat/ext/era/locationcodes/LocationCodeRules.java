@@ -14,12 +14,12 @@
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-10-30: the code patterns are public, for the workflow package.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
 
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeEntry;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.HistoryEntry;
+import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeVersion;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RinfLink;
 
@@ -31,8 +31,6 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 
 import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.ASSET;
-import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.ASSIGNED;
-import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CODE_CHANGES;
 import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CODE_TYPES;
 import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.ERA_NAMESPACE;
 import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.OPERATIONAL_POINT;
@@ -56,7 +54,8 @@ public final class LocationCodeRules {
     private LocationCodeRules() {
     }
 
-    public static List<String> codeProblems(CodeEntry code) {
+    /** The form of a code version: its code and key, RINF link, and CRD columns (VersionRules). */
+    public static List<String> versionProblems(CodeVersion code) {
         List<String> problems = new ArrayList<>();
         if (!CODE_TYPES.contains(code.codeType())) {
             problems.add("codeType must be primary or subsidiary, not \"" + code.codeType() + "\"");
@@ -73,7 +72,7 @@ public final class LocationCodeRules {
                 problems.add("a PLC has no parent primary code");
             }
             if (code.code() != null && code.code().length() >= 2
-                    && !code.code().substring(0, 2).equals(code.country())) {
+                    && !code.code().substring(0, 2).equals(code.countryIsoCode())) {
                 problems.add("country must be the code's prefix");
             }
         } else {
@@ -86,19 +85,13 @@ public final class LocationCodeRules {
                 if (!Objects.equals(code.key(), code.parentPrimaryCode() + "/" + code.code())) {
                     problems.add("key of an SLC must be \"<parent PLC>/<SLC>\"");
                 }
-                if (!code.parentPrimaryCode().substring(0, 2).equals(code.country())) {
+                if (!code.parentPrimaryCode().substring(0, 2).equals(code.countryIsoCode())) {
                     problems.add("country must be the parent PLC's prefix");
                 }
             }
         }
         problems.addAll(linkProblems(code.rinfLink(), code.isPrimary()));
-        if (!isBlankOrDate(code.validFrom())) {
-            problems.add("validFrom is not a date (YYYY-MM-DD)");
-        }
-        if (!isBlankOrDate(code.closedFrom())) {
-            problems.add("closedFrom is not a date (YYYY-MM-DD)");
-        }
-        problems.addAll(historyProblems(code.history()));
+        problems.addAll(VersionRules.problems(code));
         return problems;
     }
 
@@ -122,27 +115,6 @@ public final class LocationCodeRules {
         String uri = link.uri();
         if (!uri.startsWith(ERA_NAMESPACE) || UNSAFE_IRI.matcher(uri).find()) {
             problems.add("rinfLink is not an ERA canonical URI: " + uri);
-        }
-        return problems;
-    }
-
-    static List<String> historyProblems(List<HistoryEntry> history) {
-        List<String> problems = new ArrayList<>();
-        if (history == null || history.isEmpty()) {
-            problems.add("history is empty");
-            return problems;
-        }
-        for (int index = 0; index < history.size(); index++) {
-            HistoryEntry entry = history.get(index);
-            if (!CODE_CHANGES.contains(entry.change())) {
-                problems.add("history[" + index + "].change must be assigned, amended or closed");
-            }
-            if (isBlank(entry.at()) || isBlank(entry.requestId())) {
-                problems.add("history[" + index + "] needs at and requestId");
-            }
-            if (ASSIGNED.equals(entry.change()) && index > 0) {
-                problems.add("a code is assigned once, as its first history entry (no re-use)");
-            }
         }
         return problems;
     }
@@ -186,15 +158,6 @@ public final class LocationCodeRules {
         return problems;
     }
 
-    /** What a later save of a code may not change. */
-    public static List<String> codeChangeProblems(CodeEntry stored, CodeEntry incoming) {
-        List<String> problems = new ArrayList<>();
-        if (!Objects.equals(stored.codeType(), incoming.codeType())) {
-            problems.add("codeType cannot change");
-        }
-        return problems;
-    }
-
     /**
      * How a save relates to what is stored: it adds entries, repeats the stored
      * state, or is based on an outdated copy (someone else saved in between).
@@ -216,7 +179,7 @@ public final class LocationCodeRules {
         return value != null && pattern.matcher(value).matches();
     }
 
-    private static boolean isBlankOrDate(String value) {
+    static boolean isBlankOrDate(String value) {
         if (isBlank(value)) {
             return true;
         }

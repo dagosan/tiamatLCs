@@ -17,6 +17,7 @@
  * and POST /requests/{id}/actions (one step); the raw saves are gone.
  * Modified 2026-11-01: with era.location-codes.login.required, steps are taken
  * by the logged-in account (EraLogin) and requests need a login.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.api;
@@ -117,7 +118,10 @@ public class LocationCodeController {
         return service.changeLogJson("request", id);
     }
 
-    /** The register; filters: country (prefix), parentPrimaryCode, activeOn (YYYY-MM-DD). */
+    /**
+     * The register, one entry per code version (CRD's columns); filters: country
+     * (prefix), parentPrimaryCode, activeOn (YYYY-MM-DD: versions valid that day).
+     */
     @GetMapping("/codes")
     public String codes(
             @RequestParam(required = false) String country,
@@ -126,7 +130,7 @@ public class LocationCodeController {
         return service.codesJson(country, parentPrimaryCode, activeOn);
     }
 
-    /** One code by key: "BE00438", or "BE00438/0000000001" (slash encoded as %2F or as a path). */
+    /** The versions of one code by key: "BE00438", or "BE00438/0000000001" (slash encoded as %2F or as a path). */
     @GetMapping("/codes/{primary}")
     public String code(@PathVariable String primary) {
         return service.codeJson(primary);

@@ -14,6 +14,7 @@
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-10-30: requests change through submit and steps, not raw saves.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -133,7 +134,9 @@ public class LocationCodeControllerIntegrationTest extends TiamatIntegrationTest
         ResponseEntity<String> published = step(first, "publish", CARL, "{}");
         assertThat(published.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(published.getBody()).contains("\"key\":\"" + plc + "\"");
-        assertThat(rest.getForObject(BASE + "/codes/" + plc, String.class)).contains("\"SE00111\"");
+        String versions = rest.getForObject(BASE + "/codes/" + plc, String.class);
+        assertThat(versions).startsWith("[").contains("\"SE00111\"").contains("\"version\":1")
+                .contains("\"countryIsoCode\":\"SE\"").contains("\"locationNameAscii\":\"Test\"");
 
         String second = awaitingDecision();
         ResponseEntity<String> again = step(second, "assign", VERA, "{\"code\":\"" + plc + "\"}");

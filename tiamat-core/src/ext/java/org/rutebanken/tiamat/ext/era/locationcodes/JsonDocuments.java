@@ -14,6 +14,7 @@
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-10-30: rinfLink is public, for the workflow package.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -21,10 +22,10 @@ package org.rutebanken.tiamat.ext.era.locationcodes;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeEntry;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.HistoryEntry;
+import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeVersion;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RinfLink;
+import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.VersionChange;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -59,23 +60,59 @@ public final class JsonDocuments {
         }
     }
 
-    public static CodeEntry code(JsonNode node) {
-        requireObject(node, "code");
-        List<HistoryEntry> history = new ArrayList<>();
-        for (JsonNode entry : node.path("history")) {
-            history.add(new HistoryEntry(
-                    text(entry, "at"), text(entry, "requestId"), text(entry, "reference"), text(entry, "change")));
-        }
-        return new CodeEntry(
+    /** A code version (the frontend's CodeVersion). */
+    public static CodeVersion version(JsonNode node) {
+        requireObject(node, "code version");
+        return new CodeVersion(
                 text(node, "key"),
+                node.path("version").asInt(0),
                 text(node, "codeType"),
                 text(node, "code"),
                 text(node, "parentPrimaryCode"),
-                text(node, "country"),
+                text(node, "subsidiaryTypeCode"),
+                text(node, "countryIsoCode"),
+                text(node, "startValidity"),
+                text(node, "endValidity"),
+                text(node, "responsibleImCode"),
+                text(node, "locationName"),
+                text(node, "locationNameAscii"),
+                text(node, "nutsCode"),
+                flag(node, "containerHandlingFlag"),
+                flag(node, "handoverPointFlag"),
+                flag(node, "freightPossibleFlag"),
+                text(node, "freightStartValidity"),
+                text(node, "freightEndValidity"),
+                flag(node, "passengerPossibleFlag"),
+                text(node, "passengerStartValidity"),
+                text(node, "passengerEndValidity"),
+                number(node, "latitude"),
+                number(node, "longitude"),
+                text(node, "freeText"),
+                text(node, "addDate"),
+                text(node, "modDate"),
                 rinfLink(node.path("rinfLink")),
-                text(node, "validFrom"),
-                text(node, "closedFrom"),
-                history);
+                change(node.path("openedBy")),
+                change(node.path("endedBy")));
+    }
+
+    static VersionChange change(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        return new VersionChange(text(node, "at"), text(node, "requestId"), text(node, "reference"),
+                text(node, "change"));
+    }
+
+    /** true or false; null when missing or not a boolean. */
+    static Boolean flag(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isBoolean() ? value.asBoolean() : null;
+    }
+
+    /** A number; null when missing or not a number. */
+    static Double number(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isNumber() ? value.asDouble() : null;
     }
 
     public static RequestEntry request(JsonNode node) {

@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -21,6 +22,7 @@ import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.migration.JavaMigration;
 import org.rutebanken.tiamat.ext.era.locationcodes.api.LocationCodeController;
 import org.rutebanken.tiamat.ext.era.locationcodes.db.migration.V1__CreateEraLocationCodeTables;
+import org.rutebanken.tiamat.ext.era.locationcodes.db.migration.V2__CodeVersionsLikeCrd;
 import org.rutebanken.tiamat.ext.era.locationcodes.kg.SparqlKnowledgeGraph;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -52,7 +54,8 @@ public class EraLocationCodesConfig implements SmartInitializingSingleton {
     private static final Logger logger = LoggerFactory.getLogger(EraLocationCodesConfig.class);
 
     private static final List<Class<? extends JavaMigration>> MIGRATIONS = List.of(
-            V1__CreateEraLocationCodeTables.class
+            V1__CreateEraLocationCodeTables.class,
+            V2__CodeVersionsLikeCrd.class
     );
 
     private final DataSource dataSource;

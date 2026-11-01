@@ -13,11 +13,11 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.model;
 
-import java.util.List;
 import java.util.Set;
 
 /**
@@ -34,6 +34,9 @@ public final class LocationCodeModel {
     public static final String AMENDED = "amended";
     public static final String CLOSED = "closed";
     public static final Set<String> CODE_CHANGES = Set.of(ASSIGNED, AMENDED, CLOSED);
+    /** A version is opened by an assignment (version 1) or an amendment, ended by an amendment or a closure. */
+    public static final Set<String> OPENING_CHANGES = Set.of(ASSIGNED, AMENDED);
+    public static final Set<String> ENDING_CHANGES = Set.of(AMENDED, CLOSED);
 
     public static final Set<String> OPERATIONS =
             Set.of("newCode", "existingCode", "amendment", "deactivation");
@@ -53,8 +56,8 @@ public final class LocationCodeModel {
     private LocationCodeModel() {
     }
 
-    /** One line of a code's history. */
-    public record HistoryEntry(String at, String requestId, String reference, String change) {
+    /** The request that opened or ended a code version. */
+    public record VersionChange(String at, String requestId, String reference, String change) {
     }
 
     /** What a code or request points at in RINF. */
@@ -72,24 +75,48 @@ public final class LocationCodeModel {
         }
     }
 
-    /** A register entry (RegisteredCode in the frontend). */
-    public record CodeEntry(
+    /**
+     * One version of a location code: one row of CRD's location table (its
+     * columns in camelCase) plus what the workflow keeps; the frontend's
+     * model/CodeVersion.ts. Flags are null when the document lacks them,
+     * coordinates when not given. Changed 2026-11-02 (was one entry per code).
+     */
+    public record CodeVersion(
             String key,
+            int version,
             String codeType,
             String code,
             String parentPrimaryCode,
-            String country,
+            String subsidiaryTypeCode,
+            String countryIsoCode,
+            String startValidity,
+            String endValidity,
+            String responsibleImCode,
+            String locationName,
+            String locationNameAscii,
+            String nutsCode,
+            Boolean containerHandlingFlag,
+            Boolean handoverPointFlag,
+            Boolean freightPossibleFlag,
+            String freightStartValidity,
+            String freightEndValidity,
+            Boolean passengerPossibleFlag,
+            String passengerStartValidity,
+            String passengerEndValidity,
+            Double latitude,
+            Double longitude,
+            String freeText,
+            String addDate,
+            String modDate,
             RinfLink rinfLink,
-            String validFrom,
-            String closedFrom,
-            List<HistoryEntry> history) {
+            VersionChange openedBy,
+            VersionChange endedBy) {
 
         public boolean isPrimary() {
             return PRIMARY.equals(codeType);
         }
     }
 
-    /** A request (LocationCodeRequest in the frontend), as far as the register checks it. */
     public record RequestEntry(
             String id,
             String reference,

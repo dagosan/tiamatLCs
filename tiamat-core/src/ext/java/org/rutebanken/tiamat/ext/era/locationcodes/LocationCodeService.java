@@ -15,6 +15,7 @@
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-10-30: the register takes the workflow steps itself (submit,
  * takeStep) instead of storing documents the frontend computed.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -25,7 +26,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeRules.Extension;
 import org.rutebanken.tiamat.ext.era.locationcodes.RegisterChecks.ParentState;
 import org.rutebanken.tiamat.ext.era.locationcodes.kg.KnowledgeGraphUnavailableException;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeEntry;
+import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeVersion;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.Actor;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.AssignedCodes;
@@ -116,8 +117,9 @@ public class LocationCodeService {
         return repository.codesJson(country, parentPrimaryCode, activeOn);
     }
 
+    /** Every version of one code, oldest first. */
     public String codeJson(String key) {
-        return repository.codeDocument(key).orElseThrow(() ->
+        return repository.versionsJson(key).orElseThrow(() ->
                 new LocationCodeException(NOT_FOUND, "codeNotFound", "no code " + key));
     }
 
@@ -148,7 +150,7 @@ public class LocationCodeService {
      * One step on a request: {"action", "actor", "payload", "expectedEventCount"}.
      * expectedEventCount is how many events the actor's copy has; if someone
      * else took a step meanwhile, the step is refused (409 staleRequest).
-     * Returns {"request": …, "codes": [ register entries the step changed ]}.
+     * Returns {"request": …, "codes": [ code versions the step created or ended ]}.
      */
     public String takeStep(String pathId, String json) {
         JsonNode body = JsonDocuments.parse(json);
@@ -189,10 +191,10 @@ public class LocationCodeService {
             RequestEntry entry = checkedRequest(pathId, updated);
             ArrayNode codes = JsonDocuments.MAPPER.createArrayNode();
             if (WorkflowSteps.PUBLISH.equals(step)) {
-                codes.addAll(publicationChanges(updated, today, now));
+                codes.addAll(publicationChanges(updated, now));
             }
             if (!codes.isEmpty()) {
-                writeCodes(codeDocuments(codes), Map.of(entry.id(), entry.operation()));
+                writeVersions(versionDocuments(codes), Map.of(entry.id(), entry.operation()));
             }
             writeRequest(entry, updated);
             ObjectNode result = JsonDocuments.MAPPER.createObjectNode();
@@ -227,7 +229,7 @@ public class LocationCodeService {
             requests.add(checkedRequest(null, document));
             requestDocuments.add(document);
         }
-        List<JsonNode> codes = codeDocuments(snapshot.path("codes"));
+        List<JsonNode> codes = versionDocuments(snapshot.path("codes"));
         Map<Integer, Integer> sequences = sequences(snapshot.path("sequences"));
         return inTransactionReturning(() -> {
             int requestsAdded = 0;
@@ -246,14 +248,15 @@ public class LocationCodeService {
                 }
             }
             for (JsonNode document : codes) {
-                CodeEntry code = JsonDocuments.code(document);
-                Optional<JsonNode> stored = repository.lockCode(code.key());
+                CodeVersion version = JsonDocuments.version(document);
+                Optional<JsonNode> stored = repository.lockVersion(version.key(), version.version());
                 if (stored.isEmpty()) {
-                    repository.insertCode(code, document);
-                    repository.log("code", code.key(), "import", principal(), JsonDocuments.write(document));
+                    repository.insertVersion(version, document);
+                    repository.log("code", version.key(), "import", principal(), JsonDocuments.write(document));
                     codesAdded++;
                 } else if (!stored.get().equals(document)) {
-                    conflicts.add("code " + code.key() + " is stored with other content");
+                    conflicts.add("code " + version.key() + " version " + version.version()
+                            + " is stored with other content");
                 }
             }
             if (!conflicts.isEmpty()) {
@@ -271,7 +274,7 @@ public class LocationCodeService {
         List<String> problems = new ArrayList<>(AssignedCodes.problems(request, code));
         boolean creation = RequestRouting.isCreation(JsonDocuments.text(request.path("data"), "operation"));
         String key = AssignedCodes.keyOf(request, code);
-        if (problems.isEmpty() && creation && repository.lockCode(key).isPresent()) {
+        if (problems.isEmpty() && creation && repository.hasCode(key)) {
             problems.add(key + " is already in the register");
         }
         if (!problems.isEmpty()) {
@@ -279,14 +282,13 @@ public class LocationCodeService {
         }
     }
 
-    /** The register entries a publication creates or changes, with the SLCs it closes. */
-    private List<ObjectNode> publicationChanges(JsonNode request, LocalDate today, String now) {
+    /** The code versions a publication creates or ends, with the SLCs it closes. */
+    private List<ObjectNode> publicationChanges(JsonNode request, String now) {
         Optional<String> parent = Publication.parentWhoseDependantsClose(request);
-        List<JsonNode> activeSubsidiaries = new ArrayList<>();
+        List<JsonNode> subsidiaries = new ArrayList<>();
         List<String> kgSubsidiaryCodes = List.of();
         if (parent.isPresent()) {
-            JsonDocuments.parse(repository.codesJson(null, parent.get(), today.toString()))
-                    .forEach(activeSubsidiaries::add);
+            JsonDocuments.parse(repository.currentSubsidiariesJson(parent.get())).forEach(subsidiaries::add);
             if (registerChecks != null) {
                 try {
                     kgSubsidiaryCodes = registerChecks.subsidiaryCodesInKg(parent.get());
@@ -297,7 +299,8 @@ public class LocationCodeService {
                 }
             }
         }
-        return Publication.registerChanges(request, repository::lockCode, activeSubsidiaries, kgSubsidiaryCodes, now);
+        return Publication.registerChanges(request, repository::lockCurrentVersion, subsidiaries, kgSubsidiaryCodes,
+                now);
     }
 
     /** A step the actor may not take now: 409 when the request has moved on, 422 otherwise. */
@@ -350,52 +353,60 @@ public class LocationCodeService {
         }
     }
 
-    private void writeCodes(List<JsonNode> documents, Map<String, String> operationsInThisSave) {
+    /**
+     * Saves the versions a step created or ended. A stored version may only be
+     * ended, once (VersionRules.update); a new version 1 needs a code the
+     * register does not hold, a later one the previous version ended (in this
+     * save or before) and nothing newer stored.
+     */
+    private void writeVersions(List<JsonNode> documents, Map<String, String> operationsInThisSave) {
         List<String> problems = new ArrayList<>();
         List<Runnable> writes = new ArrayList<>();
+        Map<String, JsonNode> inThisSave = new HashMap<>();
+        documents.forEach(document -> {
+            CodeVersion version = JsonDocuments.version(document);
+            inThisSave.put(version.key() + "#" + version.version(), document);
+        });
         for (JsonNode document : documents) {
-            CodeEntry code = JsonDocuments.code(document);
-            JsonNode storedDocument = repository.lockCode(code.key()).orElse(null);
-            CodeEntry stored = storedDocument == null ? null : JsonDocuments.code(storedDocument);
-            if (stored != null) {
-                List<String> changeProblems = LocationCodeRules.codeChangeProblems(stored, code);
-                if (!changeProblems.isEmpty()) {
-                    throw new LocationCodeException(UNPROCESSABLE, "codeChangeNotAllowed", changeProblems);
-                }
-                Extension extension = LocationCodeRules.extension(stored.history(), code.history());
-                if (extension == Extension.SAME && storedDocument.equals(document)) {
+            CodeVersion version = JsonDocuments.version(document);
+            JsonNode storedDocument = repository.lockVersion(version.key(), version.version()).orElse(null);
+            if (storedDocument != null) {
+                VersionRules.Update update = VersionRules.update(storedDocument, document);
+                if (update == VersionRules.Update.SAME) {
                     continue;
                 }
-                if (extension != Extension.ADDS) {
-                    throw new LocationCodeException(CONFLICT, "staleCode", code.key()
-                            + " was changed by someone else, or is already assigned; reload and check it again");
+                if (update == VersionRules.Update.STALE) {
+                    throw staleVersion(version);
                 }
+            } else {
+                requireNextVersion(version, inThisSave);
             }
+            CodeVersion stored = storedDocument == null ? null : JsonDocuments.version(storedDocument);
             if (registerChecks != null) {
                 try {
-                    registerChecks.problems(stored, code,
+                    registerChecks.problems(stored, version,
                                     requestId -> Optional.ofNullable(operationsInThisSave.get(requestId))
                                             .or(() -> repository.requestOperation(requestId)),
                                     this::parentState)
-                            .forEach(problem -> problems.add(code.key() + ": " + problem));
+                            .forEach(problem -> problems.add(version.key() + ": " + problem));
                 } catch (KnowledgeGraphUnavailableException e) {
                     throw new LocationCodeException(UNAVAILABLE, "knowledgeGraphUnavailable",
-                            "the Knowledge Graph did not answer, so " + code.key()
+                            "the Knowledge Graph did not answer, so " + version.key()
                                     + " could not be checked; nothing was saved (" + e.getMessage() + ")");
                 }
             }
-            boolean create = stored == null;
+            boolean create = storedDocument == null;
             writes.add(() -> {
                 try {
                     if (create) {
-                        repository.insertCode(code, document);
+                        repository.insertVersion(version, document);
                     } else {
-                        repository.updateCode(code, document);
+                        repository.updateVersion(version, document);
                     }
                 } catch (DuplicateKeyException e) {
-                    throw new LocationCodeException(CONFLICT, "staleCode", code.key() + " was registered meanwhile");
+                    throw staleVersion(version);
                 }
-                repository.log("code", code.key(), create ? "create" : "update", principal(),
+                repository.log("code", version.key(), create ? "create" : "update", principal(),
                         JsonDocuments.write(document));
             });
         }
@@ -405,11 +416,38 @@ public class LocationCodeService {
         writes.forEach(Runnable::run);
     }
 
+    /** A new version follows the latest one: none for version 1, an ended version n - 1 otherwise. */
+    private void requireNextVersion(CodeVersion version, Map<String, JsonNode> inThisSave) {
+        int latestStored = repository.lockCurrentVersion(version.key())
+                .map(stored -> stored.path("version").asInt()).orElse(0);
+        if (latestStored >= version.version()) {
+            throw staleVersion(version);
+        }
+        if (version.version() == 1) {
+            if (latestStored > 0) {
+                throw staleVersion(version);
+            }
+            return;
+        }
+        String previousId = version.key() + "#" + (version.version() - 1);
+        JsonNode previous = Optional.ofNullable(inThisSave.get(previousId))
+                .or(() -> repository.lockVersion(version.key(), version.version() - 1))
+                .orElse(null);
+        if (previous == null || !previous.path("endedBy").isObject()) {
+            throw staleVersion(version);
+        }
+    }
+
+    private static LocationCodeException staleVersion(CodeVersion version) {
+        return new LocationCodeException(CONFLICT, "staleCode", version.key() + " version " + version.version()
+                + " was changed by someone else, or is already registered; reload and check it again");
+    }
+
+    /** A PLC is closed once the last day of its latest version has passed. */
     private ParentState parentState(String primaryCode) {
-        return repository.closedFrom(primaryCode)
-                .map(closedFrom -> closedFrom.isEmpty() || closedFrom.compareTo(LocalDate.now().toString()) > 0
-                        ? ParentState.ACTIVE
-                        : ParentState.CLOSED)
+        String today = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC).toString();
+        return repository.currentEndValidity(primaryCode)
+                .map(end -> end.isEmpty() || end.compareTo(today) >= 0 ? ParentState.ACTIVE : ParentState.CLOSED)
                 .orElse(ParentState.NOT_REGISTERED);
     }
 
@@ -425,18 +463,19 @@ public class LocationCodeService {
         return request;
     }
 
-    private static List<JsonNode> codeDocuments(JsonNode array) {
+    private static List<JsonNode> versionDocuments(JsonNode array) {
         if (!array.isArray()) {
             throw new LocationCodeException(BAD_REQUEST, "invalidJson", "codes must be a JSON array");
         }
         List<JsonNode> documents = new ArrayList<>();
         List<String> problems = new ArrayList<>();
-        Set<String> keys = new HashSet<>();
+        Set<String> ids = new HashSet<>();
         for (JsonNode document : array) {
-            CodeEntry code = JsonDocuments.code(document);
-            LocationCodeRules.codeProblems(code).forEach(problem -> problems.add(code.key() + ": " + problem));
-            if (!keys.add(String.valueOf(code.key()))) {
-                problems.add(code.key() + ": appears twice in one save");
+            CodeVersion version = JsonDocuments.version(document);
+            String id = version.key() + "#" + version.version();
+            LocationCodeRules.versionProblems(version).forEach(problem -> problems.add(id + ": " + problem));
+            if (!ids.add(id)) {
+                problems.add(id + ": appears twice in one save");
             }
             documents.add(document);
         }

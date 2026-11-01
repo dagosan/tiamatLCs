@@ -13,21 +13,24 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-30.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.workflow;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.rutebanken.tiamat.ext.era.locationcodes.JsonDocuments;
+import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException;
 import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeRules;
+import org.rutebanken.tiamat.ext.era.locationcodes.TestVersions;
+import org.rutebanken.tiamat.ext.era.locationcodes.VersionRules;
 
 import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowFixtures.*;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowSteps.*;
@@ -41,27 +44,47 @@ class PublicationTest {
         return take(take(ready, ASSIGN, VERA, "{'code':'" + code + "'}"), PUBLISH, CARL);
     }
 
+    private static void assertValid(ObjectNode version) {
+        assertEquals(List.of(), LocationCodeRules.versionProblems(JsonDocuments.version(version)));
+    }
+
     @Test
-    void aNewCodeEntersTheRegisterWithItsDecision() {
-        ObjectNode published = decided(newPrimaryCode("SE"), "SE00001");
+    void aNewCodeEntersTheRegisterAsVersionOneWithCrdsColumns() {
+        ObjectNode request = newPrimaryCode("SE");
+        ObjectNode crd = ((ObjectNode) request.get("data")).putObject("crd");
+        crd.put("latitude", "56,391180");
+        crd.put("longitude", "12.783443");
+        crd.put("nutsCode", "se224");
+        crd.put("passengerPossibleFlag", false);
+        crd.put("freightPossibleFlag", true);
+        crd.put("containerHandlingFlag", true);
+        crd.put("handoverPointFlag", false);
+        ObjectNode published = decided(request, "SE00001");
         List<ObjectNode> changes = Publication.registerChanges(published, key -> Optional.empty(), List.of(), List.of(), NOW);
         assertEquals(1, changes.size());
-        ObjectNode entry = changes.get(0);
-        assertEquals("SE00001", entry.get("key").asText());
-        assertEquals("SE", entry.get("country").asText());
-        assertEquals("2026-10-29", entry.get("validFrom").asText());
-        assertEquals("SE00111", entry.get("rinfLink").get("canonicalId").asText());
-        assertEquals("assigned", entry.get("history").get(0).get("change").asText());
-        assertEquals("LC-2026-0001", entry.get("history").get(0).get("reference").asText());
-        assertEquals(List.of(), LocationCodeRules.codeProblems(JsonDocuments.code(entry)));
+        ObjectNode version = changes.get(0);
+        assertEquals("SE00001", version.get("key").asText());
+        assertEquals(1, version.get("version").asInt());
+        assertEquals("SE", version.get("countryIsoCode").asText());
+        assertEquals("2026-10-29", version.get("startValidity").asText());
+        assertTrue(version.get("endValidity").isNull());
+        assertEquals("Myrbacken", version.get("locationNameAscii").asText());
+        assertEquals("SE224", version.get("nutsCode").asText());
+        assertEquals(56.39118, version.get("latitude").asDouble());
+        assertEquals("2026-10-29", version.get("freightStartValidity").asText());
+        assertTrue(version.get("passengerStartValidity").isNull());
+        assertEquals("SE00111", version.get("rinfLink").get("canonicalId").asText());
+        assertEquals("assigned", version.get("openedBy").get("change").asText());
+        assertEquals("LC-2026-0001", version.get("openedBy").get("reference").asText());
+        assertValid(version);
     }
 
     @Test
     void aNewSubsidiaryCodeIsKeyedUnderItsParent() {
         ObjectNode published = decided(newSubsidiaryCode(), "0002");
-        ObjectNode entry = Publication.registerChanges(published, key -> Optional.empty(), List.of(), List.of(), NOW).get(0);
-        assertEquals("BE00438/0002", entry.get("key").asText());
-        assertEquals(List.of(), LocationCodeRules.codeProblems(JsonDocuments.code(entry)));
+        ObjectNode version = Publication.registerChanges(published, key -> Optional.empty(), List.of(), List.of(), NOW).get(0);
+        assertEquals("BE00438/0002", version.get("key").asText());
+        assertValid(version);
     }
 
     @Test
@@ -69,47 +92,66 @@ class PublicationTest {
         ObjectNode request = closingWithDependants();
         assertEquals(Optional.of("BE00438"), Publication.parentWhoseDependantsClose(request));
         ObjectNode published = decided(request, "BE00438");
-        JsonNode registeredSlc = json("{'key':'BE00438/0003','codeType':'subsidiary','code':'0003',"
-                + "'parentPrimaryCode':'BE00438','country':'BE','name':'Track 3','rinfLink':null,'validFrom':'2026-01-05',"
-                + "'closedFrom':null,'history':[{'at':'2026-01-05T09:00:00.000Z','requestId':'r0','reference':null,"
-                + "'change':'assigned'}]}");
+        ObjectNode registeredSlc = TestVersions.slcDocument("BE00438", "0003", null, TestVersions.ASSIGNED);
 
         List<ObjectNode> changes = Publication.registerChanges(published, key -> Optional.empty(),
                 List.of(registeredSlc), List.of("0001", "0003"), NOW);
 
         assertEquals(List.of("BE00438", "BE00438/0003", "BE00438/0001"),
-                changes.stream().map(entry -> entry.get("key").asText()).toList());
-        for (ObjectNode entry : changes) {
-            assertEquals("2026-12-01", entry.get("closedFrom").asText());
-            JsonNode history = entry.get("history");
-            assertEquals("closed", history.get(history.size() - 1).get("change").asText());
-            assertEquals(List.of(), LocationCodeRules.codeProblems(JsonDocuments.code(entry)));
+                changes.stream().map(version -> version.get("key").asText()).toList());
+        for (ObjectNode version : changes) {
+            assertEquals("2026-11-30", version.get("endValidity").asText());
+            assertEquals("closed", version.get("endedBy").get("change").asText());
+            assertValid(version);
         }
-        assertEquals(2, changes.get(1).get("history").size());
-        assertTrue(registeredSlc.get("closedFrom").isNull());
+        assertEquals("2026-11-30", changes.get(1).get("passengerEndValidity").asText());
+        assertTrue(registeredSlc.get("endValidity").isNull());
     }
 
     @Test
-    void anAmendmentKeepsWhatItDoesNotChange() {
+    void anAmendmentEndsTheCurrentVersionAndOpensTheNext() {
         ObjectNode request = newPrimaryCode("BE");
         ObjectNode data = (ObjectNode) request.get("data");
         data.put("operation", "amendment");
         data.put("targetCode", "be00438 ");
-        data.put("locationName", "Gembloux");
+        data.put("locationName", "Gembloux-Nord");
         data.put("imOrganisationCode", "");
+        data.put("effectiveDate", "2026-12-13");
+        data.putObject("crd").put("freightPossibleFlag", true);
         ObjectNode published = decided(request, "BE00438");
-        JsonNode stored = json("{'key':'BE00438','codeType':'primary','code':'BE00438','parentPrimaryCode':null,"
-                + "'country':'BE','name':'Gembloux station','imOrganisationCode':'0088','rinfLink':null,"
-                + "'validFrom':'2026-01-05','closedFrom':null,'history':[{'at':'2026-01-05T09:00:00.000Z',"
-                + "'requestId':'r0','reference':null,'change':'assigned'}]}");
+        ObjectNode stored = TestVersions.plcDocument("BE00438", TestVersions.GEMBLOUX, TestVersions.ASSIGNED);
 
-        ObjectNode entry = Publication.registerChanges(published,
-                key -> "BE00438".equals(key) ? Optional.of(stored) : Optional.empty(), List.of(), List.of(), NOW).get(0);
+        List<ObjectNode> changes = Publication.registerChanges(published,
+                key -> "BE00438".equals(key) ? Optional.of(stored) : Optional.empty(), List.of(), List.of(), NOW);
 
-        assertEquals("Gembloux", entry.get("name").asText());
-        assertEquals("0088", entry.get("imOrganisationCode").asText());
-        assertEquals("amended", entry.get("history").get(1).get("change").asText());
-        assertFalse(entry.get("closedFrom").isTextual());
+        ObjectNode ended = changes.get(0);
+        ObjectNode next = changes.get(1);
+        assertEquals(1, ended.get("version").asInt());
+        assertEquals("2026-12-12", ended.get("endValidity").asText());
+        assertEquals("amended", ended.get("endedBy").get("change").asText());
+        assertEquals("Gembloux", ended.get("locationName").asText());
+        assertEquals(2, next.get("version").asInt());
+        assertEquals("2026-12-13", next.get("startValidity").asText());
+        assertEquals("Gembloux-Nord", next.get("locationName").asText());
+        assertEquals("Gembloux-Nord", next.get("locationNameAscii").asText());
+        assertEquals("0088", next.get("responsibleImCode").asText());
+        assertEquals("2026-10-29", next.get("passengerStartValidity").asText());
+        assertEquals("2026-12-13", next.get("freightStartValidity").asText());
+        assertEquals("amended", next.get("openedBy").get("change").asText());
+        assertValid(ended);
+        assertValid(next);
+        assertEquals(VersionRules.Update.ENDS, VersionRules.update(stored, ended));
+    }
+
+    @Test
+    void aChangeBeforeTheCurrentVersionStartsIsRefused() {
+        ObjectNode request = closingWithDependants();
+        ObjectNode published = decided(request, "BE00438");
+        ObjectNode stored = TestVersions.plcDocument("BE00438", TestVersions.GEMBLOUX, TestVersions.ASSIGNED);
+        stored.put("startValidity", "2026-12-01");
+        LocationCodeException refused = assertThrows(LocationCodeException.class, () ->
+                Publication.registerChanges(published, key -> Optional.of(stored), List.of(), List.of(), NOW));
+        assertEquals(List.of(Publication.EFFECTIVE_DATE_REFUSAL), refused.details());
     }
 
     @Test

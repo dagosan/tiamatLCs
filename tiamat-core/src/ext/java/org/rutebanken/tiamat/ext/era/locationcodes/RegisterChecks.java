@@ -14,13 +14,14 @@
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-10-30: subsidiaryCodesInKg, for closing a PLC with its SLCs.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
 
 import org.rutebanken.tiamat.ext.era.locationcodes.kg.KnowledgeGraph;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeEntry;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.HistoryEntry;
+import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeVersion;
+import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.VersionChange;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -61,13 +62,17 @@ public class RegisterChecks {
     }
 
     /**
-     * @param stored            the stored version, or null for a code the register does not hold
+     * A new version 1 is a new code (opened by an assignment) or a code the
+     * register knew only from the KG (opened by no request); later versions
+     * follow one the register holds, so only their RINF link is checked.
+     *
+     * @param stored            the stored version, or null for a version not saved yet
      * @param operationOfRequest the operation (newCode, existingCode, …) of a request, by id
      * @param parentState       what the register knows of a PLC, by code
      */
     public List<String> problems(
-            CodeEntry stored,
-            CodeEntry incoming,
+            CodeVersion stored,
+            CodeVersion incoming,
             Function<String, Optional<String>> operationOfRequest,
             Function<String, ParentState> parentState) {
         List<String> problems = new ArrayList<>();
@@ -76,23 +81,23 @@ public class RegisterChecks {
         if (linkChanged && !kg.elementExists(incoming.rinfLink().uri())) {
             problems.add("RINF element " + incoming.rinfLink().uri() + " is not in the Knowledge Graph");
         }
-        if (stored != null) {
+        if (stored != null || incoming.version() > 1) {
             return problems;
         }
-        HistoryEntry first = incoming.history().get(0);
-        if (ASSIGNED.equals(first.change())) {
-            String operation = operationOfRequest.apply(first.requestId()).orElse("newCode");
+        VersionChange opened = incoming.openedBy();
+        if (opened != null && ASSIGNED.equals(opened.change())) {
+            String operation = operationOfRequest.apply(opened.requestId()).orElse("newCode");
             problems.addAll(incoming.isPrimary()
                     ? newPrimaryProblems(incoming, EXISTING_CODE.equals(operation))
                     : newSubsidiaryProblems(incoming, EXISTING_CODE.equals(operation), parentState));
         } else if (!knownToKg(incoming)) {
             problems.add(incoming.key() + " is neither in the register nor in the Knowledge Graph, so it cannot be "
-                    + first.change());
+                    + (incoming.endedBy() == null ? "changed" : incoming.endedBy().change()));
         }
         return problems;
     }
 
-    private List<String> newPrimaryProblems(CodeEntry code, boolean existingCode) {
+    private List<String> newPrimaryProblems(CodeVersion code, boolean existingCode) {
         List<String> problems = new ArrayList<>();
         if (code.rinfLink() == null) {
             problems.add("a new PLC must be positioned on an operational point or a section of line");
@@ -111,7 +116,7 @@ public class RegisterChecks {
     }
 
     private List<String> newSubsidiaryProblems(
-            CodeEntry code, boolean existingCode, Function<String, ParentState> parentState) {
+            CodeVersion code, boolean existingCode, Function<String, ParentState> parentState) {
         List<String> problems = new ArrayList<>();
         String parent = code.parentPrimaryCode();
         ParentState state = parentState.apply(parent);
@@ -126,7 +131,7 @@ public class RegisterChecks {
         return problems;
     }
 
-    private boolean knownToKg(CodeEntry code) {
+    private boolean knownToKg(CodeVersion code) {
         return code.isPrimary()
                 ? kg.primaryCodeExists(code.code())
                 : kg.subsidiaryCodeExists(code.parentPrimaryCode(), code.code());

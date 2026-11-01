@@ -13,14 +13,14 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
+ * Modified 2026-11-02: code versions with CRD's columns.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeRules.Extension;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeEntry;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.HistoryEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RinfLink;
 
@@ -28,84 +28,88 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.rutebanken.tiamat.ext.era.locationcodes.TestVersions.AMENDED;
+import static org.rutebanken.tiamat.ext.era.locationcodes.TestVersions.ASSIGNED;
+import static org.rutebanken.tiamat.ext.era.locationcodes.TestVersions.GEMBLOUX;
+import static org.rutebanken.tiamat.ext.era.locationcodes.TestVersions.plc;
+import static org.rutebanken.tiamat.ext.era.locationcodes.TestVersions.plcDocument;
+import static org.rutebanken.tiamat.ext.era.locationcodes.TestVersions.slc;
+import static org.rutebanken.tiamat.ext.era.locationcodes.TestVersions.slcDocument;
 
 class LocationCodeRulesTest {
 
-    static final HistoryEntry ASSIGNED = new HistoryEntry("2026-10-29T10:00:00Z", "r1", "LC-2026-0001", "assigned");
-    static final HistoryEntry AMENDED = new HistoryEntry("2026-11-02T10:00:00Z", "r2", "LC-2026-0002", "amended");
-    static final RinfLink GEMBLOUX = new RinfLink("operationalPoint", "BELGB");
-
-    static CodeEntry plc(String code, RinfLink link, List<HistoryEntry> history) {
-        return new CodeEntry(code, "primary", code, null, code.substring(0, 2), link, "2026-10-29", null, history);
-    }
-
-    static CodeEntry slc(String parent, String code, RinfLink link, List<HistoryEntry> history) {
-        return new CodeEntry(parent + "/" + code, "subsidiary", code, parent, parent.substring(0, 2), link,
-                "2026-10-29", null, history);
+    private static List<String> problemsOf(ObjectNode document) {
+        return LocationCodeRules.versionProblems(JsonDocuments.version(document));
     }
 
     @Test
     void acceptsAWellFormedPrimaryCode() {
-        assertEquals(List.of(), LocationCodeRules.codeProblems(plc("SE00001", GEMBLOUX, List.of(ASSIGNED))));
+        assertEquals(List.of(), LocationCodeRules.versionProblems(plc("SE00001", GEMBLOUX, ASSIGNED)));
     }
 
     @Test
     void acceptsBorderPointsAndKgStyleSubsidiaryCodes() {
-        assertEquals(List.of(), LocationCodeRules.codeProblems(plc("EU00010", GEMBLOUX, List.of(ASSIGNED))));
-        assertEquals(List.of(), LocationCodeRules.codeProblems(slc("NO00922", "NO-S.1", null, List.of(ASSIGNED))));
+        assertEquals(List.of(), LocationCodeRules.versionProblems(plc("EU00010", GEMBLOUX, ASSIGNED)));
+        assertEquals(List.of(), LocationCodeRules.versionProblems(slc("NO00922", "NO-S.1", null, ASSIGNED)));
     }
 
     @Test
     void refusesMalformedPrimaryCodes() {
-        CodeEntry fourDigits = new CodeEntry("BE0438", "primary", "BE0438", null, "BE", GEMBLOUX, "", null,
-                List.of(ASSIGNED));
-        assertTrue(LocationCodeRules.codeProblems(fourDigits).get(0).contains("two letters and five digits"));
-        CodeEntry wrongCountry = new CodeEntry("BE00438", "primary", "BE00438", null, "FR", GEMBLOUX, "", null,
-                List.of(ASSIGNED));
-        assertEquals(List.of("country must be the code's prefix"), LocationCodeRules.codeProblems(wrongCountry));
+        ObjectNode fourDigits = plcDocument("BE00438", GEMBLOUX, ASSIGNED);
+        fourDigits.put("key", "BE0438");
+        fourDigits.put("code", "BE0438");
+        assertTrue(problemsOf(fourDigits).get(0).contains("two letters and five digits"));
+        ObjectNode wrongCountry = plcDocument("BE00438", GEMBLOUX, ASSIGNED);
+        wrongCountry.put("countryIsoCode", "FR");
+        assertEquals(List.of("country must be the code's prefix"), problemsOf(wrongCountry));
     }
 
     @Test
     void refusesASubsidiaryKeyThatDoesNotMatch() {
-        CodeEntry code = new CodeEntry("BE00438/1", "subsidiary", "2", "BE00438", "BE", null, "", null,
-                List.of(ASSIGNED));
-        assertEquals(List.of("key of an SLC must be \"<parent PLC>/<SLC>\""), LocationCodeRules.codeProblems(code));
+        ObjectNode code = slcDocument("BE00438", "2", null, ASSIGNED);
+        code.put("key", "BE00438/1");
+        assertEquals(List.of("key of an SLC must be \"<parent PLC>/<SLC>\""), problemsOf(code));
     }
 
     @Test
     void aPrimaryCodeCannotSitOnAnAsset() {
         RinfLink track = new RinfLink("asset", "http://data.europa.eu/949/track/0088_BELGB_Gembloux-voie-III");
-        assertEquals(1, LocationCodeRules.codeProblems(plc("BE00999", track, List.of(ASSIGNED))).size());
-        assertEquals(List.of(), LocationCodeRules.codeProblems(slc("BE00438", "0000000001", track, List.of(ASSIGNED))));
+        assertEquals(1, LocationCodeRules.versionProblems(plc("BE00999", track, ASSIGNED)).size());
+        assertEquals(List.of(), LocationCodeRules.versionProblems(slc("BE00438", "0000000001", track, ASSIGNED)));
     }
 
     @Test
     void refusesLinksOutsideTheEraNamespace() {
         RinfLink elsewhere = new RinfLink("asset", "http://example.org/x> } DROP ALL {");
-        assertEquals(1, LocationCodeRules.codeProblems(slc("BE00438", "1", elsewhere, List.of(ASSIGNED))).size());
+        assertEquals(1, LocationCodeRules.versionProblems(slc("BE00438", "1", elsewhere, ASSIGNED)).size());
     }
 
     @Test
     void aCodeIsAssignedOnlyOnce() {
-        List<String> problems = LocationCodeRules.codeProblems(plc("BE00999", GEMBLOUX,
-                List.of(ASSIGNED, new HistoryEntry("2027-01-01T00:00:00Z", "r9", null, "assigned"))));
-        assertEquals(List.of("a code is assigned once, as its first history entry (no re-use)"), problems);
+        ObjectNode second = plcDocument("BE00999", GEMBLOUX, ASSIGNED);
+        second.put("version", 2);
+        assertEquals(List.of("a later version is opened by an amendment (codes are not re-assigned)"),
+                problemsOf(second));
+        ObjectNode amended = plcDocument("BE00999", GEMBLOUX, AMENDED);
+        assertEquals(List.of("version 1 is opened by an assignment"), problemsOf(amended));
     }
 
     @Test
-    void refusesEmptyHistoryAndBadDates() {
-        CodeEntry code = new CodeEntry("BE00999", "primary", "BE00999", null, "BE", GEMBLOUX, "29/10/2026", null,
-                List.of());
-        assertEquals(List.of("validFrom is not a date (YYYY-MM-DD)", "history is empty"),
-                LocationCodeRules.codeProblems(code));
+    void refusesBadDates() {
+        ObjectNode code = plcDocument("BE00999", GEMBLOUX, ASSIGNED);
+        code.put("startValidity", "29/10/2026");
+        assertEquals(List.of("startValidity is not a date (YYYY-MM-DD)"), problemsOf(code));
+        ObjectNode backwards = plcDocument("BE00999", GEMBLOUX, ASSIGNED);
+        backwards.put("endValidity", "2026-10-28");
+        assertEquals(List.of("endValidity is before startValidity"), problemsOf(backwards));
     }
 
     @Test
-    void savesMustExtendTheStoredHistory() {
-        assertEquals(Extension.ADDS, LocationCodeRules.extension(List.of(ASSIGNED), List.of(ASSIGNED, AMENDED)));
-        assertEquals(Extension.SAME, LocationCodeRules.extension(List.of(ASSIGNED), List.of(ASSIGNED)));
-        assertEquals(Extension.STALE, LocationCodeRules.extension(List.of(ASSIGNED, AMENDED), List.of(ASSIGNED)));
-        assertEquals(Extension.STALE, LocationCodeRules.extension(List.of(ASSIGNED), List.of(AMENDED)));
+    void savesOfARequestMustExtendItsEvents() {
+        assertEquals(Extension.ADDS, LocationCodeRules.extension(List.of("submit"), List.of("submit", "register")));
+        assertEquals(Extension.SAME, LocationCodeRules.extension(List.of("submit"), List.of("submit")));
+        assertEquals(Extension.STALE, LocationCodeRules.extension(List.of("submit", "register"), List.of("submit")));
+        assertEquals(Extension.STALE, LocationCodeRules.extension(List.of("submit"), List.of("register")));
     }
 
     @Test

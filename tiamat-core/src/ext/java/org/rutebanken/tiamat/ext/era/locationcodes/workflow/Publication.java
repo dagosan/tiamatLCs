@@ -12,62 +12,58 @@
  * See the Licence for the specific language governing permissions and
  * limitations under the Licence.
  *
- * Added for the ERA Location Code Manager, 2026-10-30.
+ * Added for the ERA Location Code Manager, 2026-10-30; code versions as in CRD, 2026-11-02.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.workflow;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException;
 
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 
 import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.AMENDED;
-import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.ASSIGNED;
 import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CLOSED;
 import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.PRIMARY;
-import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.SUBSIDIARY;
-import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestDocuments.array;
-import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestDocuments.hasValue;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestDocuments.normalisedPrimaryCode;
-import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestDocuments.object;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestDocuments.text;
-import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestDocuments.trimmed;
 
 /**
- * The register entries a published decision creates or changes (procedure
- * step 7); same as the frontend's workflow/publication.ts. Closing a PLC with
- * its dependants also closes its SLCs, from the register and from the KG.
+ * The code versions a published decision creates or changes (procedure
+ * step 7); same as the frontend's workflow/publication.ts. A new code gets
+ * version 1. An amendment ends the current version the day before its
+ * effective date and opens the next; a deactivation ends it. Closing a PLC
+ * with its dependants also closes its SLCs, from the register and the KG.
  */
 public final class Publication {
 
+    /** The frontend's text key for a change that cannot apply to the current version. */
+    public static final String EFFECTIVE_DATE_REFUSAL = "rinf_lc_blocked_effective_date";
     private static final String DEACTIVATION = "deactivation";
     private static final String AMENDMENT = "amendment";
-    private static final int COUNTRY_LENGTH = 2;
     private static final int ISO_DATE_LENGTH = 10;
 
     private Publication() {
     }
 
     /**
-     * @param request              the request, with its decision, being published
-     * @param registered           the register entry with a key, if any
-     * @param activeSubsidiaries   SLCs the register holds under the PLC being closed, active today
-     * @param kgSubsidiaryCodes    SLC values the KG links to that PLC
-     * @param now                  when, as an ISO instant
+     * @param request             the request, with its decision, being published
+     * @param currentVersion      the latest stored version of a code, by key
+     * @param subsidiaries        latest versions of the SLCs the register holds under the PLC being closed
+     * @param kgSubsidiaryCodes   SLC values the KG links to that PLC
+     * @param now                 when, as an ISO instant
+     * @throws LocationCodeException 422 when the change cannot apply to the current version
      */
     public static List<ObjectNode> registerChanges(
             JsonNode request,
-            Function<String, Optional<JsonNode>> registered,
-            List<JsonNode> activeSubsidiaries,
+            Function<String, Optional<JsonNode>> currentVersion,
+            List<JsonNode> subsidiaries,
             List<String> kgSubsidiaryCodes,
             String now) {
         String code = text(request.path("decision"), "code");
@@ -76,18 +72,23 @@ public final class Publication {
         }
         JsonNode data = request.path("data");
         if (RequestRouting.isCreation(text(data, "operation"))) {
-            return List.of(createdEntry(request, code, now));
+            ObjectNode base = CodeVersions.fromKg(request, code, now);
+            return List.of(CodeVersions.opened(request, base, null, now.substring(0, ISO_DATE_LENGTH), now));
         }
-        ObjectNode entry = registered.apply(AssignedCodes.keyOf(request, code))
+        ObjectNode current = currentVersion.apply(CodeVersions.keyOf(request, code))
                 .map(stored -> (ObjectNode) stored.deepCopy())
-                .orElseGet(() -> entryFromKg(request, code));
+                .orElseGet(() -> CodeVersions.fromKg(request, code, now));
+        String effectiveDate = text(data, "effectiveDate");
+        requireChangeable(current, effectiveDate);
         if (AMENDMENT.equals(text(data, "operation"))) {
-            return List.of(amended(request, entry, now));
+            return List.of(
+                    CodeVersions.ended(request, current, effectiveDate, AMENDED, now),
+                    CodeVersions.opened(request, current, current, effectiveDate, now));
         }
         List<ObjectNode> changes = new ArrayList<>();
-        changes.add(closed(request, entry, now));
+        changes.add(CodeVersions.ended(request, current, effectiveDate, CLOSED, now));
         parentWhoseDependantsClose(request).ifPresent(parent ->
-                changes.addAll(dependants(request, parent, activeSubsidiaries, kgSubsidiaryCodes, now)));
+                changes.addAll(dependants(request, parent, subsidiaries, kgSubsidiaryCodes, now)));
         return changes;
     }
 
@@ -100,101 +101,51 @@ public final class Publication {
         return closes ? Optional.of(normalisedPrimaryCode(text(data, "targetCode"))) : Optional.empty();
     }
 
+    /** A change applies to an open version, and its new version starts after the current one did. */
+    private static void requireChangeable(JsonNode current, String effectiveDate) {
+        String start = text(current, "startValidity");
+        boolean valid = effectiveDate != null && effectiveDate.matches("^\\d{4}-\\d{2}-\\d{2}$");
+        boolean startsLater = start == null || (valid && effectiveDate.compareTo(start) > 0);
+        if (!valid || current.path("endedBy").isObject() || !startsLater) {
+            throw new LocationCodeException(LocationCodeException.UNPROCESSABLE, "actionNotAllowed",
+                    EFFECTIVE_DATE_REFUSAL);
+        }
+    }
+
     private static List<ObjectNode> dependants(JsonNode request, String parent,
-            List<JsonNode> activeSubsidiaries, List<String> kgSubsidiaryCodes, String now) {
+            List<JsonNode> subsidiaries, List<String> kgSubsidiaryCodes, String now) {
+        String effectiveDate = text(request.path("data"), "effectiveDate");
+        String today = now.substring(0, ISO_DATE_LENGTH);
+        JsonNode subsidiaryRequest = subsidiaryRequest(request, parent);
         List<ObjectNode> changes = new ArrayList<>();
         Set<String> registeredValues = new HashSet<>();
-        for (JsonNode subsidiary : activeSubsidiaries) {
+        for (JsonNode subsidiary : subsidiaries) {
             registeredValues.add(text(subsidiary, "code"));
-            changes.add(closed(request, (ObjectNode) subsidiary.deepCopy(), now));
+            if (isOpen(subsidiary, today)) {
+                changes.add(CodeVersions.ended(request, subsidiary, effectiveDate, CLOSED, now));
+            }
         }
         for (String value : kgSubsidiaryCodes) {
             if (registeredValues.add(value)) {
-                changes.add(closed(request, kgEntry(SUBSIDIARY, value, parent), now));
+                ObjectNode fromKg = CodeVersions.fromKg(subsidiaryRequest, value, now);
+                changes.add(CodeVersions.ended(request, fromKg, effectiveDate, CLOSED, now));
             }
         }
         return changes;
     }
 
-    private static ObjectNode createdEntry(JsonNode request, String code, String now) {
-        JsonNode data = request.path("data");
-        ObjectNode entry = entryFromKg(request, code);
-        entry.put("name", trimmed(data, "locationName"));
-        entry.put("imOrganisationCode", trimmed(data, "imOrganisationCode").toUpperCase(Locale.ROOT));
-        entry.put("subsidiaryTypeCode", trimmed(data, "subsidiaryTypeCode"));
-        entry.set("rinfLink", data.path("rinfLink").isObject() ? data.get("rinfLink").deepCopy() : NullNode.getInstance());
-        entry.put("validFrom", now.substring(0, ISO_DATE_LENGTH));
-        entry.set("history", array().add(historyEntry(request, ASSIGNED, now)));
-        return entry;
+    /** Not ended by a request, and not past its last day. */
+    private static boolean isOpen(JsonNode version, String today) {
+        String end = text(version, "endValidity");
+        return !version.path("endedBy").isObject() && (end == null || end.compareTo(today) >= 0);
     }
 
-    private static ObjectNode amended(JsonNode request, ObjectNode entry, String now) {
-        JsonNode data = request.path("data");
-        String name = trimmed(data, "locationName");
-        String im = trimmed(data, "imOrganisationCode").toUpperCase(Locale.ROOT);
-        if (!name.isEmpty()) {
-            entry.put("name", name);
-        }
-        if (!im.isEmpty()) {
-            entry.put("imOrganisationCode", im);
-        }
-        if (data.path("rinfLink").isObject()) {
-            entry.set("rinfLink", data.get("rinfLink").deepCopy());
-        }
-        history(entry).add(historyEntry(request, AMENDED, now));
-        return entry;
-    }
-
-    private static ObjectNode closed(JsonNode request, ObjectNode entry, String now) {
-        entry.put("closedFrom", text(request.path("data"), "effectiveDate"));
-        history(entry).add(historyEntry(request, CLOSED, now));
-        return entry;
-    }
-
-    /** A register entry for a code known only from the KG, so it can change. */
-    private static ObjectNode entryFromKg(JsonNode request, String code) {
-        JsonNode data = request.path("data");
-        boolean primary = PRIMARY.equals(text(data, "codeType"));
-        String value = primary ? normalisedPrimaryCode(code) : code.trim();
-        return kgEntry(primary ? PRIMARY : SUBSIDIARY, value,
-                primary ? null : normalisedPrimaryCode(text(data, "parentPrimaryCode")));
-    }
-
-    private static ObjectNode kgEntry(String codeType, String code, String parent) {
-        boolean primary = PRIMARY.equals(codeType);
-        ObjectNode entry = object();
-        entry.put("key", primary ? code : parent + "/" + code);
-        entry.put("codeType", codeType);
-        entry.put("code", code);
-        entry.put("parentPrimaryCode", parent);
-        entry.put("country", countryOf(primary ? code : parent));
-        entry.put("name", "");
-        entry.put("imOrganisationCode", "");
-        entry.put("subsidiaryTypeCode", "");
-        entry.putNull("rinfLink");
-        entry.put("validFrom", "");
-        entry.putNull("closedFrom");
-        entry.set("history", array());
-        return entry;
-    }
-
-    private static String countryOf(String primaryCode) {
-        return primaryCode.length() < COUNTRY_LENGTH ? primaryCode : primaryCode.substring(0, COUNTRY_LENGTH);
-    }
-
-    private static ArrayNode history(ObjectNode entry) {
-        if (!entry.path("history").isArray()) {
-            entry.set("history", array());
-        }
-        return (ArrayNode) entry.get("history");
-    }
-
-    private static ObjectNode historyEntry(JsonNode request, String change, String now) {
-        ObjectNode entry = object();
-        entry.put("at", now);
-        entry.put("requestId", text(request, "id"));
-        entry.put("reference", hasValue(request, "reference") ? text(request, "reference") : null);
-        entry.put("change", change);
-        return entry;
+    /** The request read as one about an SLC under `parent`, to build its KG version. */
+    private static JsonNode subsidiaryRequest(JsonNode request, String parent) {
+        ObjectNode copy = request.deepCopy();
+        ObjectNode data = (ObjectNode) copy.path("data");
+        data.put("codeType", "subsidiary");
+        data.put("parentPrimaryCode", parent);
+        return copy;
     }
 }

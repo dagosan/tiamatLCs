@@ -1,5 +1,6 @@
 <!-- Added for the ERA Location Code Manager, 2026-10-29. Licensed under the EUPL 1.2.
-     Modified 2026-10-30: the register takes the workflow steps itself; Docker image (Dockerfile.era). -->
+     Modified 2026-10-30: the register takes the workflow steps itself; Docker image (Dockerfile.era).
+     Modified 2026-11-02: the register holds code versions with CRD's columns (migration V2). -->
 
 # ERA Location Code Manager: the register in Tiamat
 
@@ -7,8 +8,26 @@ Tiamat hosts the location code register of ERA's Location Code Manager, the
 frontend built on Abzu (https://github.com/dagosan/abzuKG,
 `src/rinf/locationCodes`): the requests for
 primary and subsidiary location codes (PLC, SLC), the register of assigned codes
-with their history, and the yearly counters behind request references
-(LC-2026-0001).
+as versions in the shape of CRD's location table, and the yearly counters behind
+request references (LC-2026-0001).
+
+## Codes are kept as CRD keeps them (since 2026-11-02)
+
+One row per version of a code, with CRD's columns (`Country_ISO_code` …
+`Mod_Date`, as `countryIsoCode` … `modDate` in the JSON and snake case in
+the table; `Active_Flag` follows from the dates), plus the version number,
+the SLC fields, the RINF element and the requests that opened and ended the
+version. A new code is version 1, valid from its publication. An amendment
+ends the current version the day before its effective date and opens the
+next with the changed values; a deactivation ends the current version.
+`End_Validity` is the last valid day, as in CRD. Passenger and freight use
+start with the version that makes them possible and end with a closure. The
+CRD columns of a new PLC come from the request's `crd` part (ASCII name, NUTS
+code, position, the four flags, free text); an amendment changes only what it
+gives. `workflow/CodeVersions.java` and `workflow/Publication.java` match the
+frontend's `workflow/codeVersionChanges.ts` and `workflow/publication.ts`.
+Migration V2 turned each entry of the old one-row-per-code table into version
+1 of its code and kept the old table as `ext_era_lc_code_before_v2`.
 
 ## The workflow is the register's
 
@@ -55,7 +74,10 @@ Whatever the step, a save is refused if it would break the register:
 | Check | Answer when it fails |
 | --- | --- |
 | Codes have the right form: PLC = two letters + five digits, key = code; SLC = 1–10 letters, digits, dots, hyphens, key = `<PLC>/<SLC>`; country = prefix | 400 `invalidCode` |
-| A code is assigned once, as the first line of its history; later saves only add lines | 409 `staleCode` |
+| A code is assigned once (version 1, opened by an assignment); a later version is opened by an amendment and follows an ended version | 409 `staleCode`, 400 `invalidCode` |
+| A stored version changes only once, when a request ends it (end date, `endedBy`, end of its uses) | 409 `staleCode` |
+| A change takes effect after the current version starts, and the current version is not already ended | 422 `actionNotAllowed` (`rinf_lc_blocked_effective_date`); nothing is saved |
+| CRD's columns are well formed: dates, end not before start, flags true or false, use dates only with the flag, latitude and longitude together and in range, ASCII name printable ASCII, NUTS code 1–5 capitals or digits, free text up to 255 characters | 400 `invalidCode` (the database checks most of them too) |
 | A request's events only grow; its reference, once given, never changes | 409 `staleRequest`, 422 `requestChangeNotAllowed` |
 | Request references are unique | 409 `duplicateReference` |
 | A new PLC is positioned on an operational point or section of line (Art. 9(6) TEL TSI, procedure 8.6) | 422 `codeRejected` |
@@ -110,10 +132,10 @@ All under `/era/v1/location-codes`, JSON, the frontend's own documents.
 | `GET /requests` | all requests, oldest first |
 | `GET /requests/{id}` | one request |
 | `POST /requests` | submit: `{"actor": {"name", "role": "requester"}, "data": …}`; 201 with the request and its id |
-| `POST /requests/{id}/actions` | one step: `{"action": "register", "actor": {"name", "role"}, "payload": {…}, "expectedEventCount": 1}`; 200 with `{"request": …, "codes": [ register entries changed ]}` |
+| `POST /requests/{id}/actions` | one step: `{"action": "register", "actor": {"name", "role"}, "payload": {…}, "expectedEventCount": 1}`; 200 with `{"request": …, "codes": [ code versions created or ended ]}` |
 | `GET /requests/{id}/changes` | every saved version, with time and user |
-| `GET /codes?country=BE&parentPrimaryCode=BE00438&activeOn=2026-10-29` | the register (filters optional) |
-| `GET /codes/{plc}`, `GET /codes/{plc}/{slc}` | one code |
+| `GET /codes?country=BE&parentPrimaryCode=BE00438&activeOn=2026-10-29` | the register, every version (filters optional; `activeOn` keeps the versions valid that day) |
+| `GET /codes/{plc}`, `GET /codes/{plc}/{slc}` | the versions of one code, oldest first |
 | `GET /codes/{plc}/changes` | every saved version of a PLC |
 | `GET /snapshot` | everything, in the frontend's backup-file format |
 | `POST /import` | load a backup file; entries stored identically are skipped, a difference refuses the whole file (409 `importConflict`); history and KG checks do not apply to a backup |
@@ -123,7 +145,8 @@ All under `/era/v1/location-codes`, JSON, the frontend's own documents.
 | Table | Holds |
 | --- | --- |
 | `ext_era_lc_request` | one row per request: the JSON document plus status, code type, operation, country, reference (unique) |
-| `ext_era_lc_code` | one row per code: the JSON document plus code, parent, country, RINF link, validity; the database itself checks the code forms |
+| `ext_era_lc_code_version` | one row per code version (key, version): CRD's columns, code type, parent, SLC type, RINF link, the requests that opened and ended it, and the JSON document; the database itself checks the code forms and most CRD rules |
+| `ext_era_lc_code_before_v2` | the table before V2 (one row per code), kept as it was |
 | `ext_era_lc_reference_sequence` | last reference number per year |
 | `ext_era_lc_change_log` | every save, in order, with the authenticated user when there is one |
 
