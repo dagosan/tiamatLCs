@@ -15,14 +15,19 @@
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-10-30: requests change only through POST /requests (submit)
  * and POST /requests/{id}/actions (one step); the raw saves are gone.
+ * Modified 2026-11-01: with era.location-codes.login.required, steps are taken
+ * by the logged-in account (EraLogin) and requests need a login.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.api;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.rutebanken.tiamat.ext.era.locationcodes.JsonDocuments;
 import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException;
 import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeService;
+import org.rutebanken.tiamat.ext.era.locationcodes.auth.EraLogin;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.Actor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
@@ -54,25 +59,46 @@ public class LocationCodeController {
     private static final Logger logger = LoggerFactory.getLogger(LocationCodeController.class);
 
     private final LocationCodeService service;
+    private final EraLogin login;
 
-    public LocationCodeController(LocationCodeService service) {
+    public LocationCodeController(LocationCodeService service, EraLogin login) {
         this.service = service;
+        this.login = login;
+    }
+
+    /**
+     * With a login required, the actor of a submission or step is the
+     * logged-in account: its name, and the role asked for if it holds it.
+     */
+    private String withAccountActor(String body) {
+        if (!login.required()) {
+            return body;
+        }
+        JsonNode parsed = JsonDocuments.parse(body);
+        if (!(parsed instanceof ObjectNode object)) {
+            return body;
+        }
+        String role = object.path("actor").path("role").asText("");
+        object.set("actor", login.actorFor(role).toJson());
+        return JsonDocuments.write(object);
     }
 
     @GetMapping("/requests")
     public String requests() {
+        login.requireLogin();
         return service.requestsJson();
     }
 
     @GetMapping("/requests/{id}")
     public String request(@PathVariable String id) {
+        login.requireLogin();
         return service.requestJson(id);
     }
 
     /** Submits a request: {"actor": {"name", "role": "requester"}, "data": …}; returns it with its id (201). */
     @PostMapping(value = "/requests", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> submit(@RequestBody String body) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(service.submit(body));
+        return ResponseEntity.status(HttpStatus.CREATED).body(service.submit(withAccountActor(body)));
     }
 
     /**
@@ -82,11 +108,12 @@ public class LocationCodeController {
      */
     @PostMapping(value = "/requests/{id}/actions", consumes = MediaType.APPLICATION_JSON_VALUE)
     public String takeStep(@PathVariable String id, @RequestBody String body) {
-        return service.takeStep(id, body);
+        return service.takeStep(id, withAccountActor(body));
     }
 
     @GetMapping("/requests/{id}/changes")
     public String requestChanges(@PathVariable String id) {
+        login.requireLogin();
         return service.changeLogJson("request", id);
     }
 
@@ -112,18 +139,21 @@ public class LocationCodeController {
 
     @GetMapping("/codes/{primary}/changes")
     public String codeChanges(@PathVariable String primary) {
+        login.requireLogin();
         return service.changeLogJson("code", primary);
     }
 
     /** Everything, in the format of the frontend's backup file. */
     @GetMapping("/snapshot")
     public String snapshot() {
+        login.requireRole(Actor.CODE_ADMINISTRATOR);
         return service.snapshotJson();
     }
 
     /** Loads a backup file; refuses it whole if it disagrees with what is stored. */
     @PostMapping(value = "/import", consumes = MediaType.APPLICATION_JSON_VALUE)
     public String importSnapshot(@RequestBody String body) {
+        login.requireRole(Actor.CODE_ADMINISTRATOR);
         return service.importSnapshot(body);
     }
 

@@ -127,17 +127,34 @@ All under `/era/v1/location-codes`, JSON, the frontend's own documents.
 | `ext_era_lc_reference_sequence` | last reference number per year |
 | `ext_era_lc_change_log` | every save, in order, with the authenticated user when there is one |
 
+## Login (added 2026-11-01)
+
+With `era.location-codes.login.required=true`, the register trusts the login,
+not the request body (`auth/EraLogin.java`):
+
+| Endpoint | Needs |
+| --- | --- |
+| `GET /codes…` (the register) | nothing: it is public |
+| `GET /requests…`, `GET …/changes` | a login (401 `loginRequired`) |
+| `POST /requests`, `POST /requests/{id}/actions` | a login; the actor's name is the account's, its role must be one the account holds (403 `roleNotHeld`) |
+| `GET /snapshot`, `POST /import` | the code administrator role |
+
+Tiamat checks the token's signature and expiry against the login service's
+keys (`SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWKSETURI`, e.g. Keycloak's
+`…/realms/era/protocol/openid-connect/certs`). The name is read from the
+`name` claim (`era.location-codes.login.name-claim`, then
+`preferred_username`), the roles from `lcm_roles`
+(`era.location-codes.login.roles-claim`, then Keycloak's `realm_access.roles`).
+Roles are the workflow's own names: `requester`, `codeAdministrator`,
+`rinfCorrespondent`, `externalCoordinationPoint`, `validatingOfficer`.
+
+Without the setting (development, tests) the register still applies every
+rule, but to the actor the frontend names.
+
 ## Not yet
 
-- No authentication of its own: the endpoints are as open as the rest of
-  Tiamat in this setup (`TiamatSecurityConfig` permits all requests). The
-  register applies every rule above, but to the actor the frontend names: until
-  there is a login, it cannot tell whether that is really who is acting. With
-  OIDC, the actor will come from the token instead of the request body
-  (`workflow/Actor.java`). Reading (`GET`) is not limited per role either.
-- `POST /import` loads a backup without the workflow rules (it is the record
-  of decisions already taken); once there is a login it should be limited to
-  the register's administrators.
+- A requester can read every request once logged in; the frontend shows only
+  their own, but the API does not filter them yet.
 - The technical checks and the value to assign come from the frontend (see
   above); running the checks in the register, with SHACL, is the next step.
 - The register is not exported as NeTEx and the codes are not linked to
