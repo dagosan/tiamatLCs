@@ -18,6 +18,7 @@
  * Modified 2026-11-01: with era.location-codes.login.required, steps are taken
  * by the logged-in account (EraLogin) and requests need a login.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-10: master data (countries, subsidiary types).
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.api;
@@ -39,6 +40,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -145,6 +147,32 @@ public class LocationCodeController {
     public String codeChanges(@PathVariable String primary) {
         login.requireLogin();
         return service.changeLogJson("code", primary);
+    }
+
+    /** The countries codes are assigned for; with validOn (YYYY-MM-DD), those valid that day. Public. */
+    @GetMapping("/countries")
+    public String countries(@RequestParam(required = false) String validOn) {
+        return service.countriesJson(validOn);
+    }
+
+    /** Adds or replaces a country; a code administrator's task. */
+    @PutMapping(value = "/countries/{isoCode}", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public String saveCountry(@PathVariable String isoCode, @RequestBody String body) {
+        login.requireRole(Actor.CODE_ADMINISTRATOR);
+        return service.saveCountry(isoCode, body);
+    }
+
+    /** The subsidiary location code types; with validOn (YYYY-MM-DD), those valid that day. Public. */
+    @GetMapping("/subsidiary-types")
+    public String subsidiaryTypes(@RequestParam(required = false) String validOn) {
+        return service.subsidiaryTypesJson(validOn);
+    }
+
+    /** Adds or replaces a subsidiary location code type; a code administrator's task. */
+    @PutMapping(value = "/subsidiary-types/{code}", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public String saveSubsidiaryType(@PathVariable String code, @RequestBody String body) {
+        login.requireRole(Actor.CODE_ADMINISTRATOR);
+        return service.saveSubsidiaryType(code, body);
     }
 
     /** Everything, in the format of the frontend's backup file. */

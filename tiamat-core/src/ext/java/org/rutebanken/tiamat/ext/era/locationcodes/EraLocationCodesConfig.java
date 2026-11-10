@@ -14,6 +14,7 @@
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-10: migration V3 (master data).
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -23,6 +24,7 @@ import org.flywaydb.core.api.migration.JavaMigration;
 import org.rutebanken.tiamat.ext.era.locationcodes.api.LocationCodeController;
 import org.rutebanken.tiamat.ext.era.locationcodes.db.migration.V1__CreateEraLocationCodeTables;
 import org.rutebanken.tiamat.ext.era.locationcodes.db.migration.V2__CodeVersionsLikeCrd;
+import org.rutebanken.tiamat.ext.era.locationcodes.db.migration.V3__MasterData;
 import org.rutebanken.tiamat.ext.era.locationcodes.kg.SparqlKnowledgeGraph;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,7 +57,8 @@ public class EraLocationCodesConfig implements SmartInitializingSingleton {
 
     private static final List<Class<? extends JavaMigration>> MIGRATIONS = List.of(
             V1__CreateEraLocationCodeTables.class,
-            V2__CodeVersionsLikeCrd.class
+            V2__CodeVersionsLikeCrd.class,
+            V3__MasterData.class
     );
 
     private final DataSource dataSource;

@@ -14,6 +14,7 @@
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-10: master data (countries, subsidiary types; V3).
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -28,7 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-/** SQL for the ext_era_lc_* tables (V1, and V2 for code versions). Callers hold the transaction. */
+/** SQL for the ext_era_lc_* tables (V1, V2 for code versions, V3 for master data). Callers hold the transaction. */
 public class LocationCodeRepository {
 
     private final JdbcTemplate jdbc;
@@ -237,6 +238,67 @@ public class LocationCodeRepository {
     public String sequencesJson() {
         return jdbc.queryForObject("SELECT coalesce(jsonb_object_agg(year::text, last_value), '{}'::jsonb)::text "
                 + "FROM ext_era_lc_reference_sequence", String.class);
+    }
+
+    private static final String VALID_ON = " WHERE (valid_from IS NULL OR valid_from <= CAST(? AS date))"
+            + " AND (valid_to IS NULL OR valid_to >= CAST(? AS date))";
+
+    /** The countries as a JSON array, by ISO code; with validOn, those valid that day. */
+    public String countriesJson(String validOn) {
+        return masterDataJson("ext_era_lc_country", "iso_code", validOn);
+    }
+
+    /** The subsidiary types as a JSON array, by code; with validOn, those valid that day. */
+    public String subsidiaryTypesJson(String validOn) {
+        return masterDataJson("ext_era_lc_subsidiary_type", "code", validOn);
+    }
+
+    private String masterDataJson(String table, String key, String validOn) {
+        String select = "SELECT coalesce(jsonb_agg(document ORDER BY " + key + "), '[]'::jsonb)::text FROM " + table;
+        if (validOn == null) {
+            return jdbc.queryForObject(select, String.class);
+        }
+        return jdbc.queryForObject(select + VALID_ON, String.class, validOn, validOn);
+    }
+
+    public Optional<JsonNode> country(String isoCode) {
+        return first(jdbc.queryForList(
+                "SELECT document::text FROM ext_era_lc_country WHERE iso_code = ?", String.class, isoCode));
+    }
+
+    public Optional<JsonNode> subsidiaryType(String code) {
+        return first(jdbc.queryForList(
+                "SELECT document::text FROM ext_era_lc_subsidiary_type WHERE code = ?", String.class, code));
+    }
+
+    /** Adds the country, or replaces the stored one with the same ISO code. */
+    public void saveCountry(JsonNode country) {
+        jdbc.update("INSERT INTO ext_era_lc_country (iso_code, uic_code, name, eu_member_state, plc_range_start, "
+                        + "plc_range_end, valid_from, valid_to, document) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, CAST(? AS date), CAST(? AS date), CAST(? AS jsonb)) "
+                        + "ON CONFLICT (iso_code) DO UPDATE SET uic_code = EXCLUDED.uic_code, name = EXCLUDED.name, "
+                        + "eu_member_state = EXCLUDED.eu_member_state, plc_range_start = EXCLUDED.plc_range_start, "
+                        + "plc_range_end = EXCLUDED.plc_range_end, valid_from = EXCLUDED.valid_from, "
+                        + "valid_to = EXCLUDED.valid_to, document = EXCLUDED.document, "
+                        + "revision = ext_era_lc_country.revision + 1, updated_at = now()",
+                country.path("isoCode").asText(), blankToNull(country.path("uicCode").asText("")),
+                country.path("name").asText(), country.path("euMemberState").asBoolean(),
+                country.path("plcRangeStart").asInt(), country.path("plcRangeEnd").asInt(),
+                blankToNull(country.path("validFrom").asText("")), blankToNull(country.path("validTo").asText("")),
+                JsonDocuments.write(country));
+    }
+
+    /** Adds the subsidiary type, or replaces the stored one with the same code. */
+    public void saveSubsidiaryType(JsonNode type) {
+        jdbc.update("INSERT INTO ext_era_lc_subsidiary_type (code, name, retail_related, valid_from, valid_to, "
+                        + "document) VALUES (?, ?, ?, CAST(? AS date), CAST(? AS date), CAST(? AS jsonb)) "
+                        + "ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, "
+                        + "retail_related = EXCLUDED.retail_related, valid_from = EXCLUDED.valid_from, "
+                        + "valid_to = EXCLUDED.valid_to, document = EXCLUDED.document, "
+                        + "revision = ext_era_lc_subsidiary_type.revision + 1, updated_at = now()",
+                type.path("code").asText(), type.path("name").asText(), type.path("retailRelated").asBoolean(),
+                blankToNull(type.path("validFrom").asText("")), blankToNull(type.path("validTo").asText("")),
+                JsonDocuments.write(type));
     }
 
     public void log(String entity, String key, String operation, String principal, String json) {

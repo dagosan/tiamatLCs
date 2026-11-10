@@ -1,6 +1,7 @@
 <!-- Added for the ERA Location Code Manager, 2026-10-29. Licensed under the EUPL 1.2.
      Modified 2026-10-30: the register takes the workflow steps itself; Docker image (Dockerfile.era).
-     Modified 2026-11-02: the register holds code versions with CRD's columns (migration V2). -->
+     Modified 2026-11-02: the register holds code versions with CRD's columns (migration V2).
+     Modified 2026-11-10: master data, countries and subsidiary types (migration V3). -->
 
 # ERA Location Code Manager: the register in Tiamat
 
@@ -28,6 +29,38 @@ gives. `workflow/CodeVersions.java` and `workflow/Publication.java` match the
 frontend's `workflow/codeVersionChanges.ts` and `workflow/publication.ts`.
 Migration V2 turned each entry of the old one-row-per-code table into version
 1 of its code and kept the old table as `ext_era_lc_code_before_v2`.
+
+## Master data (since 2026-11-10)
+
+The countries codes are assigned for and the subsidiary location code types
+are tables the code administrator maintains (LCMS specification FR-27, 5.2
+and 5.5), no longer lists in the code. Migration V3 creates them and fills
+them with the lists the code held (`masterdata/DefaultMasterData.java`, the
+same as the frontend's): 39 country prefixes, with the UIC country code where
+there is one (`EU` and `LI` have none), and the 48 subsidiary types of the XSD
+(release 4.0.0) with the requester of TD 103 Table 6. The UIC codes were
+entered from the UIC list, not read from `TAP_TSI_codelist.xsd`: check them
+against it.
+
+A country: `{"isoCode": "BE", "uicCode": "88", "name": "Belgium",
+"euMemberState": true, "plcRangeStart": 1, "plcRangeEnd": 99999,
+"validFrom": null, "validTo": null}`. A type: `{"code": "01", "name":
+"Track", "requesterRoles": ["infrastructureManager"], "retailRelated": false,
+"validFrom": null, "validTo": null}`. Dates are days, `validTo` the last valid
+day, as for code versions.
+
+The register reads them where it used its own lists:
+
+| Rule | Answer when it fails |
+| --- | --- |
+| A request names a country in the table, valid today | 422 `invalidRequest` |
+| A new SLC names a subsidiary type in the table, valid today (BR-08) | 422 `invalidRequest` |
+| A new PLC's number lies in the country's range (BR-10); an existing code is registered as it is | 422 `codeNotAssignable` |
+| A new code of a country that is not an EU Member State goes to external coordination (BR-11); so does one of a country no longer in the table | (routing) |
+
+Not taken from the specification's tables: the definition text, the
+allocation entity (always ERA) and the code format per type; country names in
+German and French.
 
 ## The workflow is the register's
 
@@ -137,6 +170,8 @@ All under `/era/v1/location-codes`, JSON, the frontend's own documents.
 | `GET /codes?country=BE&parentPrimaryCode=BE00438&activeOn=2026-10-29` | the register, every version (filters optional; `activeOn` keeps the versions valid that day) |
 | `GET /codes/{plc}`, `GET /codes/{plc}/{slc}` | the versions of one code, oldest first |
 | `GET /codes/{plc}/changes` | every saved version of a PLC |
+| `GET /countries?validOn=2026-11-10`, `GET /subsidiary-types?validOn=…` | master data, public; `validOn` keeps what is valid that day |
+| `PUT /countries/{isoCode}`, `PUT /subsidiary-types/{code}` | add or replace one (code administrator); 400 `invalidMasterData`, 409 `duplicateUicCode` |
 | `GET /snapshot` | everything, in the frontend's backup-file format |
 | `POST /import` | load a backup file; entries stored identically are skipped, a difference refuses the whole file (409 `importConflict`); history and KG checks do not apply to a backup |
 
@@ -147,6 +182,8 @@ All under `/era/v1/location-codes`, JSON, the frontend's own documents.
 | `ext_era_lc_request` | one row per request: the JSON document plus status, code type, operation, country, reference (unique) |
 | `ext_era_lc_code_version` | one row per code version (key, version): CRD's columns, code type, parent, SLC type, RINF link, the requests that opened and ended it, and the JSON document; the database itself checks the code forms and most CRD rules |
 | `ext_era_lc_code_before_v2` | the table before V2 (one row per code), kept as it was |
+| `ext_era_lc_country` | one row per country: ISO code, UIC code (unique), name, EU flag, range for new PLCs, validity, and the JSON document |
+| `ext_era_lc_subsidiary_type` | one row per subsidiary type: code, name, retail flag, validity, and the JSON document (with the requester roles) |
 | `ext_era_lc_reference_sequence` | last reference number per year |
 | `ext_era_lc_change_log` | every save, in order, with the authenticated user when there is one |
 
@@ -180,6 +217,7 @@ rule, but to the actor the frontend names.
   their own, but the API does not filter them yet.
 - The technical checks and the value to assign come from the frontend (see
   above); running the checks in the register, with SHACL, is the next step.
+- The backup file (`/snapshot`, `/import`) does not carry the master data.
 - The register is not exported as NeTEx and the codes are not linked to
   Tiamat stop places.
 

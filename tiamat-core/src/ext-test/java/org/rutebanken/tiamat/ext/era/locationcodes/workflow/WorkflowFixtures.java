@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-30.
+ * Modified 2026-11-10: steps carry whether the country is outside the EU.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.workflow;
@@ -20,6 +21,7 @@ package org.rutebanken.tiamat.ext.era.locationcodes.workflow;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.rutebanken.tiamat.ext.era.locationcodes.JsonDocuments;
+import org.rutebanken.tiamat.ext.era.locationcodes.masterdata.DefaultMasterData;
 
 import java.time.LocalDate;
 
@@ -80,7 +82,8 @@ final class WorkflowFixtures {
 
     static ObjectNode take(JsonNode request, String step, Actor actor, String payload) {
         String reference = WorkflowSteps.REGISTER.equals(step) ? "LC-2026-0001" : null;
-        return RequestTransitions.apply(request, new Step(step, actor, json(payload), NOW, reference));
+        return RequestTransitions.apply(request,
+                new Step(step, actor, json(payload), NOW, reference, outsideEu(request)));
     }
 
     static ObjectNode take(JsonNode request, String step, Actor actor) {
@@ -94,5 +97,13 @@ final class WorkflowFixtures {
                 "{'checks':[{'item':'noDuplicate','outcome':'pass'}],'assignableCode':'SE00001'}");
         return take(checked, WorkflowSteps.COMPLETE_VALIDATION, CARL,
                 "{'recommendation':{'outcome':'assign','ground':null}}");
+    }
+
+    /** As the register works it out: from the country master data it starts with. */
+    static boolean outsideEu(JsonNode request) {
+        String country = request.path("data").path("country").asText("");
+        return DefaultMasterData.countries().stream()
+                .filter(each -> country.equals(each.path("isoCode").asText()))
+                .anyMatch(each -> !each.path("euMemberState").asBoolean());
     }
 }

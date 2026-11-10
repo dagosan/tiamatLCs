@@ -13,13 +13,12 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-30.
+ * Modified 2026-11-10: "outside the EU" is the country's master data, passed in.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.workflow;
 
 import com.fasterxml.jackson.databind.JsonNode;
-
-import java.util.Set;
 
 import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.PRIMARY;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestDocuments.hasValue;
@@ -30,10 +29,6 @@ import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestDocume
  * same rules as the frontend's workflow/routing.ts and laterStepChanges.ts.
  */
 public final class RequestRouting {
-
-    /** Prefixes outside the EU (frontend model/countries.ts): uniqueness is confirmed first (8.7). */
-    static final Set<String> NON_EU_PREFIXES = Set.of(
-            "AL", "BA", "BY", "CH", "GB", "LI", "MD", "ME", "MK", "NO", "RS", "TR", "UA");
 
     private static final String DEACTIVATION = "deactivation";
 
@@ -54,18 +49,18 @@ public final class RequestRouting {
     }
 
     /** Non-EU country or legacy range of an international organisation (8.7, 10.3). */
-    public static boolean needsExternalCoordination(JsonNode request) {
+    public static boolean needsExternalCoordination(JsonNode request, boolean outsideEu) {
         JsonNode data = request.path("data");
         return isCreation(text(data, "operation"))
-                && (NON_EU_PREFIXES.contains(text(data, "country")) || data.path("legacyCodingRange").asBoolean(false));
+                && (outsideEu || data.path("legacyCodingRange").asBoolean(false));
     }
 
-    public static String statusAfterValidation(JsonNode request) {
-        return needsRinfHarmonisation(request) ? "rinfHarmonisation" : statusAfterHarmonisation(request);
+    public static String statusAfterValidation(JsonNode request, boolean outsideEu) {
+        return needsRinfHarmonisation(request) ? "rinfHarmonisation" : statusAfterHarmonisation(request, outsideEu);
     }
 
-    public static String statusAfterHarmonisation(JsonNode request) {
-        return needsExternalCoordination(request) ? "externalCoordination" : "awaitingDecision";
+    public static String statusAfterHarmonisation(JsonNode request, boolean outsideEu) {
+        return needsExternalCoordination(request, outsideEu) ? "externalCoordination" : "awaitingDecision";
     }
 
     /** After a review revises a decision: back to the step still open. */

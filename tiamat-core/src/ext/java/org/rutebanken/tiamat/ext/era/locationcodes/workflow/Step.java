@@ -13,6 +13,8 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-30.
+ * Modified 2026-11-10: whether the request's country is outside the EU comes
+ * with the step (from the country master data), not from a list in the code.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.workflow;
@@ -27,6 +29,12 @@ import com.fasterxml.jackson.databind.JsonNode;
  * @param payload   what the frontend sends with it (ActionPayload in the frontend)
  * @param now       when, as an ISO instant from the server's clock
  * @param reference the request reference the register gave, for "register"; else null
+ * @param outsideEu whether the request's country is not an EU Member State (master data)
  */
-public record Step(String name, Actor actor, JsonNode payload, String now, String reference) {
+public record Step(String name, Actor actor, JsonNode payload, String now, String reference, boolean outsideEu) {
+
+    /** A step on a request of an EU Member State. */
+    public Step(String name, Actor actor, JsonNode payload, String now, String reference) {
+        this(name, actor, payload, now, reference, false);
+    }
 }

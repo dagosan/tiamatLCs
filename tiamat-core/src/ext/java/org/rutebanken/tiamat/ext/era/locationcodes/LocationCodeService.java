@@ -16,6 +16,8 @@
  * Modified 2026-10-30: the register takes the workflow steps itself (submit,
  * takeStep) instead of storing documents the frontend computed.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-10: master data (countries, subsidiary types) and the
+ * rules that read them.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -27,6 +29,7 @@ import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeRules.Extension;
 import org.rutebanken.tiamat.ext.era.locationcodes.RegisterChecks.ParentState;
 import org.rutebanken.tiamat.ext.era.locationcodes.kg.KnowledgeGraphUnavailableException;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeVersion;
+import org.rutebanken.tiamat.ext.era.locationcodes.masterdata.MasterData;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.Actor;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.AssignedCodes;
@@ -66,6 +69,7 @@ import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.NOT_FOUND;
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.UNAVAILABLE;
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.UNPROCESSABLE;
+import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.PRIMARY;
 
 /**
  * The register. It takes each workflow step itself: it checks that the step
@@ -87,6 +91,8 @@ public class LocationCodeService {
     /** Null when the Knowledge Graph checks are switched off. */
     private final RegisterChecks registerChecks;
     private final Clock clock;
+
+    private static final int COUNTRY_PREFIX_LENGTH = 2;
 
     public LocationCodeService(
             LocationCodeRepository repository, TransactionTemplate transactions, RegisterChecks registerChecks) {
@@ -142,6 +148,7 @@ public class LocationCodeService {
         }
         ObjectNode request = NewRequests.create(UUID.randomUUID().toString(), body.get("data"), actor, now());
         RequestEntry entry = checkedRequest(null, request);
+        requireMasterData(request.path("data"));
         inTransaction(() -> writeRequest(entry, request));
         return JsonDocuments.write(request);
     }
@@ -187,7 +194,8 @@ public class LocationCodeService {
             String reference = WorkflowSteps.REGISTER.equals(step)
                     ? NewRequests.reference(today.getYear(), repository.nextReferenceSequence(today.getYear()))
                     : null;
-            ObjectNode updated = RequestTransitions.apply(stored, new Step(step, actor, payload, now, reference));
+            ObjectNode updated = RequestTransitions.apply(stored,
+                    new Step(step, actor, payload, now, reference, isOutsideEu(stored)));
             RequestEntry entry = checkedRequest(pathId, updated);
             ArrayNode codes = JsonDocuments.MAPPER.createArrayNode();
             if (WorkflowSteps.PUBLISH.equals(step)) {
@@ -277,9 +285,111 @@ public class LocationCodeService {
         if (problems.isEmpty() && creation && repository.hasCode(key)) {
             problems.add(key + " is already in the register");
         }
+        if (problems.isEmpty()) {
+            problems.addAll(rangeProblems(request.path("data"), key));
+        }
         if (!problems.isEmpty()) {
             throw new LocationCodeException(UNPROCESSABLE, "codeNotAssignable", problems);
         }
+    }
+
+    /** A new PLC takes a number from its country's range (BR-10); an existing code is registered as it is. */
+    private List<String> rangeProblems(JsonNode data, String key) {
+        boolean newPrimary = "newCode".equals(JsonDocuments.text(data, "operation"))
+                && PRIMARY.equals(JsonDocuments.text(data, "codeType"));
+        Optional<JsonNode> country = repository.country(JsonDocuments.text(data, "country"));
+        if (!newPrimary || country.isEmpty()) {
+            return List.of();
+        }
+        int locationNumber = Integer.parseInt(key.substring(COUNTRY_PREFIX_LENGTH));
+        if (MasterData.inRange(country.get(), locationNumber)) {
+            return List.of();
+        }
+        return List.of(key + " is outside the range for new codes of " + JsonDocuments.text(data, "country") + " ("
+                + country.get().path("plcRangeStart").asInt() + " to " + country.get().path("plcRangeEnd").asInt()
+                + ")");
+    }
+
+    /**
+     * A request names a country the register assigns codes for, and a new SLC a
+     * subsidiary type, both valid today (BR-08).
+     */
+    private void requireMasterData(JsonNode data) {
+        LocalDate today = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC);
+        List<String> problems = new ArrayList<>();
+        String country = JsonDocuments.text(data, "country");
+        if (repository.country(country).filter(stored -> MasterData.validOn(stored, today)).isEmpty()) {
+            problems.add("codes are not assigned for country \"" + country + "\"");
+        }
+        boolean newSubsidiary = RequestRouting.isCreation(JsonDocuments.text(data, "operation"))
+                && !PRIMARY.equals(JsonDocuments.text(data, "codeType"));
+        String type = JsonDocuments.text(data, "subsidiaryTypeCode");
+        if (newSubsidiary
+                && repository.subsidiaryType(type).filter(stored -> MasterData.validOn(stored, today)).isEmpty()) {
+            problems.add("\"" + type + "\" is not a subsidiary location code type in use");
+        }
+        if (!problems.isEmpty()) {
+            throw new LocationCodeException(UNPROCESSABLE, "invalidRequest", problems);
+        }
+    }
+
+    /** Whether the request's country is not an EU Member State; a country no longer listed counts as outside. */
+    private boolean isOutsideEu(JsonNode request) {
+        return repository.country(JsonDocuments.text(request.path("data"), "country"))
+                .map(country -> !country.path("euMemberState").asBoolean())
+                .orElse(true);
+    }
+
+    public String countriesJson(String validOn) {
+        if (validOn != null) {
+            requireDate(validOn, "validOn");
+        }
+        return repository.countriesJson(validOn);
+    }
+
+    public String subsidiaryTypesJson(String validOn) {
+        if (validOn != null) {
+            requireDate(validOn, "validOn");
+        }
+        return repository.subsidiaryTypesJson(validOn);
+    }
+
+    /** Adds or replaces a country (FR-27); returns it as stored. */
+    public String saveCountry(String isoCode, String json) {
+        ObjectNode country = MasterData.country(JsonDocuments.parse(json));
+        List<String> problems = new ArrayList<>(MasterData.countryProblems(country));
+        if (!isoCode.equals(country.path("isoCode").asText())) {
+            problems.add("isoCode in the body differs from the URL (" + isoCode + ")");
+        }
+        return savedMasterData("country", isoCode, country, problems, () -> repository.saveCountry(country));
+    }
+
+    /** Adds or replaces a subsidiary location code type (FR-27); returns it as stored. */
+    public String saveSubsidiaryType(String code, String json) {
+        ObjectNode type = MasterData.subsidiaryType(JsonDocuments.parse(json));
+        List<String> problems = new ArrayList<>(MasterData.subsidiaryTypeProblems(type));
+        if (!code.equals(type.path("code").asText())) {
+            problems.add("code in the body differs from the URL (" + code + ")");
+        }
+        return savedMasterData("subsidiaryType", code, type, problems, () -> repository.saveSubsidiaryType(type));
+    }
+
+    private String savedMasterData(String entity, String key, ObjectNode document, List<String> problems,
+            Runnable save) {
+        if (!problems.isEmpty()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidMasterData", problems);
+        }
+        String json = JsonDocuments.write(document);
+        inTransaction(() -> {
+            try {
+                save.run();
+            } catch (DuplicateKeyException e) {
+                throw new LocationCodeException(CONFLICT, "duplicateUicCode",
+                        "another country already has UIC code " + document.path("uicCode").asText());
+            }
+            repository.log(entity, key, "save", principal(), json);
+        });
+        return json;
     }
 
     /** The code versions a publication creates or ends, with the SLCs it closes. */
