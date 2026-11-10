@@ -17,7 +17,7 @@
  * takeStep) instead of storing documents the frontend computed.
  * Modified 2026-11-02: code versions with CRD's columns.
  * Modified 2026-11-10: master data (countries, subsidiary types) and the
- * rules that read them.
+ * rules that read them; a requester's own requests; request drafts.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -64,6 +64,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.BAD_REQUEST;
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.CONFLICT;
@@ -94,6 +95,8 @@ public class LocationCodeService {
     private final Clock clock;
 
     private static final int COUNTRY_PREFIX_LENGTH = 2;
+    private static final Pattern DRAFT_ID = Pattern.compile("^[A-Za-z0-9-]{1,64}$");
+    private static final int MAX_DRAFTS_PER_OWNER = 100;
 
     public LocationCodeService(
             LocationCodeRepository repository, TransactionTemplate transactions, RegisterChecks registerChecks) {
@@ -108,13 +111,88 @@ public class LocationCodeService {
         this.clock = clock;
     }
 
-    public String requestsJson() {
-        return repository.requestsJson();
+    /** Every request, or with `onlyOf` the requests that person submitted. */
+    public String requestsJson(Optional<String> onlyOf) {
+        return onlyOf.map(repository::requestsJsonOf).orElseGet(repository::requestsJson);
     }
 
-    public String requestJson(String id) {
-        return repository.requestDocument(id).orElseThrow(() ->
-                new LocationCodeException(NOT_FOUND, "requestNotFound", "no request " + id));
+    /** One request; with `onlyOf`, another person's request is answered as if it did not exist. */
+    public String requestJson(String id, Optional<String> onlyOf) {
+        String document = repository.requestDocument(id).orElseThrow(() -> noRequest(id));
+        boolean readable = onlyOf.isEmpty()
+                || Actor.isSamePerson(JsonDocuments.text(JsonDocuments.parse(document), "submittedBy"), onlyOf.get());
+        if (!readable) {
+            throw noRequest(id);
+        }
+        return document;
+    }
+
+    /** The saved versions of a request, readable as the request itself is. */
+    public String requestChangeLogJson(String id, Optional<String> onlyOf) {
+        requestJson(id, onlyOf);
+        return repository.changeLogJson("request", id);
+    }
+
+    private static LocationCodeException noRequest(String id) {
+        return new LocationCodeException(NOT_FOUND, "requestNotFound", "no request " + id);
+    }
+
+    /** One person's drafts, last saved first. */
+    public String draftsJson(String owner) {
+        return repository.draftsJson(owner);
+    }
+
+    /**
+     * Saves a request form not yet submitted: {"data": …}. The draft keeps its
+     * owner; another person's draft is answered as if it did not exist.
+     * Returns {"id", "owner", "savedAt", "data"}.
+     */
+    public String saveDraft(String id, String owner, String json) {
+        JsonNode body = JsonDocuments.parse(json);
+        if (!DRAFT_ID.matcher(id).matches()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidDraft",
+                    "a draft's id is 1 to 64 letters, digits or hyphens");
+        }
+        if (!body.path("data").isObject()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidDraft", "data must be an object");
+        }
+        ObjectNode draft = JsonDocuments.MAPPER.createObjectNode();
+        draft.put("id", id);
+        draft.put("owner", owner);
+        draft.put("savedAt", now());
+        draft.set("data", body.get("data"));
+        String document = JsonDocuments.write(draft);
+        inTransaction(() -> {
+            Optional<JsonNode> stored = repository.lockDraft(id);
+            if (stored.isPresent()) {
+                requireOwner(stored.get(), owner);
+            } else if (repository.draftCount(owner) >= MAX_DRAFTS_PER_OWNER) {
+                throw new LocationCodeException(UNPROCESSABLE, "tooManyDrafts",
+                        "at most " + MAX_DRAFTS_PER_OWNER + " drafts; submit or discard one first");
+            }
+            repository.saveDraft(id, owner, document);
+        });
+        return document;
+    }
+
+    /** Discards a draft of `owner`. */
+    public void deleteDraft(String id, String owner) {
+        inTransaction(() -> removeDraft(id, owner));
+    }
+
+    private void removeDraft(String id, String owner) {
+        requireOwner(repository.lockDraft(id).orElseThrow(() -> noDraft(id)), owner);
+        repository.deleteDraft(id);
+    }
+
+    private static void requireOwner(JsonNode draft, String owner) {
+        if (!Actor.isSamePerson(JsonDocuments.text(draft, "owner"), owner)) {
+            throw noDraft(JsonDocuments.text(draft, "id"));
+        }
+    }
+
+    private static LocationCodeException noDraft(String id) {
+        return new LocationCodeException(NOT_FOUND, "draftNotFound", "no draft " + id);
     }
 
     public String codesJson(String country, String parentPrimaryCode, String activeOn) {
@@ -135,8 +213,9 @@ public class LocationCodeService {
     }
 
     /**
-     * Procedure step 2: {"actor": …, "data": …}. The register gives the
-     * request its id and records the submission; returns the request.
+     * Procedure step 2: {"actor": …, "data": …, "draftId": …}. The register
+     * gives the request its id and records the submission, and removes the
+     * submitter's draft it was written from, if one is named; returns the request.
      */
     public String submit(String json) {
         JsonNode body = JsonDocuments.parse(json);
@@ -151,7 +230,16 @@ public class LocationCodeService {
                 now());
         RequestEntry entry = checkedRequest(null, request);
         requireMasterData(request.path("data"));
-        inTransaction(() -> writeRequest(entry, request));
+        String draftId = JsonDocuments.text(body, "draftId");
+        inTransaction(() -> {
+            writeRequest(entry, request);
+            // The draft the request was written from has done its work.
+            if (draftId != null && repository.lockDraft(draftId)
+                    .filter(draft -> Actor.isSamePerson(JsonDocuments.text(draft, "owner"), actor.name()))
+                    .isPresent()) {
+                repository.deleteDraft(draftId);
+            }
+        });
         return JsonDocuments.write(request);
     }
 

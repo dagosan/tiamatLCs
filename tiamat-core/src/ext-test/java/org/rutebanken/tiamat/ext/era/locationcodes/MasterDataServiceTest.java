@@ -20,17 +20,10 @@ package org.rutebanken.tiamat.ext.era.locationcodes;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
-import org.rutebanken.tiamat.ext.era.locationcodes.masterdata.DefaultMasterData;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
-import org.springframework.transaction.support.TransactionCallback;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -43,83 +36,8 @@ class MasterDataServiceTest {
     private static final String RITA = "{'name':'Rita Correspondent','role':'rinfCorrespondent'}";
     private static final String VERA = "{'name':'Vera Officer','role':'validatingOfficer'}";
 
-    /** The repository's requests and master data in maps; the register starts with its default lists. */
-    private static final class MemoryRepository extends LocationCodeRepository {
-
-        private final Map<String, JsonNode> requests = new HashMap<>();
-        private final Map<String, JsonNode> countries = new HashMap<>();
-        private final Map<String, JsonNode> types = new HashMap<>();
-        private int lastReference;
-
-        private MemoryRepository() {
-            super(null);
-            DefaultMasterData.countries().forEach(this::saveCountry);
-            DefaultMasterData.subsidiaryTypes().forEach(this::saveSubsidiaryType);
-        }
-
-        @Override
-        public Optional<JsonNode> lockRequest(String id) {
-            return Optional.ofNullable(requests.get(id));
-        }
-
-        @Override
-        public void insertRequest(RequestEntry request, String json) {
-            requests.put(request.id(), JsonDocuments.parse(json));
-        }
-
-        @Override
-        public void updateRequest(RequestEntry request, String json) {
-            requests.put(request.id(), JsonDocuments.parse(json));
-        }
-
-        @Override
-        public boolean hasCode(String key) {
-            return false;
-        }
-
-        @Override
-        public int nextReferenceSequence(int year) {
-            return ++lastReference;
-        }
-
-        @Override
-        public Optional<JsonNode> country(String isoCode) {
-            return Optional.ofNullable(countries.get(isoCode));
-        }
-
-        @Override
-        public Optional<JsonNode> subsidiaryType(String code) {
-            return Optional.ofNullable(types.get(code));
-        }
-
-        @Override
-        public void saveCountry(JsonNode country) {
-            countries.put(country.path("isoCode").asText(), country);
-        }
-
-        @Override
-        public void saveSubsidiaryType(JsonNode type) {
-            types.put(type.path("code").asText(), type);
-        }
-
-        @Override
-        public void log(String entity, String key, String operation, String principal, String json) {
-            // Not kept.
-        }
-    }
-
-    private static final class NoTransaction extends TransactionTemplate {
-
-        private static final long serialVersionUID = 1L;
-
-        @Override
-        public <T> T execute(TransactionCallback<T> action) {
-            return action.doInTransaction(null);
-        }
-    }
-
     private final MemoryRepository repository = new MemoryRepository();
-    private final LocationCodeService service = new LocationCodeService(repository, new NoTransaction(), null,
+    private final LocationCodeService service = new LocationCodeService(repository, new MemoryRepository.NoTransaction(), null,
             Clock.fixed(Instant.parse("2026-11-10T10:00:00Z"), ZoneOffset.UTC));
 
     private static String json(String text) {

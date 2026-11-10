@@ -14,7 +14,8 @@
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-11-02: code versions with CRD's columns.
- * Modified 2026-11-10: master data (countries, subsidiary types; V3).
+ * Modified 2026-11-10: master data (countries, subsidiary types; V3); a
+ * requester's own requests; request drafts (V4).
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -59,6 +60,45 @@ public class LocationCodeRepository {
         return jdbc.queryForObject(
                 "SELECT coalesce(jsonb_agg(document ORDER BY submitted_at, id), '[]'::jsonb)::text "
                         + "FROM ext_era_lc_request", String.class);
+    }
+
+    /** The requests one person submitted, oldest first; names compare without case or outer spaces. */
+    public String requestsJsonOf(String submittedBy) {
+        return jdbc.queryForObject(
+                "SELECT coalesce(jsonb_agg(document ORDER BY submitted_at, id), '[]'::jsonb)::text "
+                        + "FROM ext_era_lc_request WHERE lower(btrim(document->>'submittedBy')) = lower(btrim(?))",
+                String.class, submittedBy);
+    }
+
+    /** One person's drafts, last saved first, as a JSON array. */
+    public String draftsJson(String owner) {
+        return jdbc.queryForObject(
+                "SELECT coalesce(jsonb_agg(document ORDER BY updated_at DESC, id), '[]'::jsonb)::text "
+                        + "FROM ext_era_lc_draft WHERE lower(btrim(owner)) = lower(btrim(?))", String.class, owner);
+    }
+
+    public int draftCount(String owner) {
+        Integer count = jdbc.queryForObject(
+                "SELECT count(*) FROM ext_era_lc_draft WHERE lower(btrim(owner)) = lower(btrim(?))",
+                Integer.class, owner);
+        return count == null ? 0 : count;
+    }
+
+    /** The stored draft, locked until the transaction ends. */
+    public Optional<JsonNode> lockDraft(String id) {
+        return first(jdbc.queryForList(
+                "SELECT document::text FROM ext_era_lc_draft WHERE id = ? FOR UPDATE", String.class, id));
+    }
+
+    /** Adds the draft, or replaces the stored one with the same id. */
+    public void saveDraft(String id, String owner, String json) {
+        jdbc.update("INSERT INTO ext_era_lc_draft (id, owner, document) VALUES (?, ?, CAST(? AS jsonb)) "
+                + "ON CONFLICT (id) DO UPDATE SET document = EXCLUDED.document, updated_at = now()",
+                id, owner, json);
+    }
+
+    public void deleteDraft(String id) {
+        jdbc.update("DELETE FROM ext_era_lc_draft WHERE id = ?", id);
     }
 
     public void insertRequest(RequestEntry request, String json) {

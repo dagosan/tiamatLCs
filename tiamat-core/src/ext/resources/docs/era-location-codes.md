@@ -1,7 +1,8 @@
 <!-- Added for the ERA Location Code Manager, 2026-10-29. Licensed under the EUPL 1.2.
      Modified 2026-10-30: the register takes the workflow steps itself; Docker image (Dockerfile.era).
      Modified 2026-11-02: the register holds code versions with CRD's columns (migration V2).
-     Modified 2026-11-10: master data, countries and subsidiary types (migration V3). -->
+     Modified 2026-11-10: master data, countries and subsidiary types (migration V3); a requester reads only
+     own requests; request drafts (migration V4). -->
 
 # ERA Location Code Manager: the register in Tiamat
 
@@ -61,6 +62,23 @@ The register reads them where it used its own lists:
 Not taken from the specification's tables: the definition text, the
 allocation entity (always ERA) and the code format per type; country names in
 German and French.
+
+## Drafts, and whose requests one reads (since 2026-11-10)
+
+A draft is a request form saved before it is submitted (LCMS specification:
+state "Draft", a requester amends own drafts). It is not a request: no status,
+no history, no reference; the Agency never sees it; it is removed when it is
+submitted (`draftId` in the submission, same transaction) or discarded. The
+request statuses are unchanged. A draft is `{"id", "owner", "savedAt",
+"data"}`; the frontend chooses the id (letters, digits, hyphens). At most 100
+per owner. Another person's draft is answered 404, as if it did not exist.
+
+With a login required, an account without an Agency role reads only the
+requests it submitted (`GET /requests` is filtered; another person's request
+and its changes answer 404), and drafts are the account's own (it must hold
+the role `requester`). Without a login the register cannot know the caller:
+requests are all returned (the frontend shows a requester their own) and
+drafts are those of the `owner` the frontend names.
 
 ## The workflow is the register's
 
@@ -162,9 +180,12 @@ All under `/era/v1/location-codes`, JSON, the frontend's own documents.
 
 | Method and path | |
 | --- | --- |
-| `GET /requests` | all requests, oldest first |
+| `GET /requests` | the requests the caller may read, oldest first: all, or a requester account's own |
 | `GET /requests/{id}` | one request |
-| `POST /requests` | submit: `{"actor": {"name", "role": "requester"}, "data": …}`; 201 with the request and its id |
+| `POST /requests` | submit: `{"actor": {"name", "role": "requester"}, "data": …, "draftId": …}`; 201 with the request and its id; removes the submitter's draft `draftId`, if given |
+| `GET /drafts?owner=…` | the caller's drafts, last saved first (`owner` only without a login) |
+| `PUT /drafts/{id}?owner=…` | save a draft: `{"data": …}`; 400 `invalidDraft`, 404 `draftNotFound` (another's), 422 `tooManyDrafts` |
+| `DELETE /drafts/{id}?owner=…` | discard a draft; 204 |
 | `POST /requests/{id}/actions` | one step: `{"action": "register", "actor": {"name", "role"}, "payload": {…}, "expectedEventCount": 1}`; 200 with `{"request": …, "codes": [ code versions created or ended ]}` |
 | `GET /requests/{id}/changes` | every saved version, with time and user |
 | `GET /codes?country=BE&parentPrimaryCode=BE00438&activeOn=2026-10-29` | the register, every version (filters optional; `activeOn` keeps the versions valid that day) |
@@ -184,6 +205,7 @@ All under `/era/v1/location-codes`, JSON, the frontend's own documents.
 | `ext_era_lc_code_before_v2` | the table before V2 (one row per code), kept as it was |
 | `ext_era_lc_country` | one row per country: ISO code, UIC code (unique), name, EU flag, range for new PLCs, validity, and the JSON document |
 | `ext_era_lc_subsidiary_type` | one row per subsidiary type: code, name, retail flag, validity, and the JSON document (with the requester roles) |
+| `ext_era_lc_draft` | one row per draft: id, owner, the JSON document |
 | `ext_era_lc_reference_sequence` | last reference number per year |
 | `ext_era_lc_change_log` | every save, in order, with the authenticated user when there is one |
 
@@ -213,8 +235,6 @@ rule, but to the actor the frontend names.
 
 ## Not yet
 
-- A requester can read every request once logged in; the frontend shows only
-  their own, but the API does not filter them yet.
 - The technical checks and the value to assign come from the frontend (see
   above); running the checks in the register, with SHACL, is the next step.
 - The backup file (`/snapshot`, `/import`) does not carry the master data.

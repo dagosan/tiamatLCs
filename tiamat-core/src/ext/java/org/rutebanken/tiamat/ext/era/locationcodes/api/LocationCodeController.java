@@ -18,7 +18,8 @@
  * Modified 2026-11-01: with era.location-codes.login.required, steps are taken
  * by the logged-in account (EraLogin) and requests need a login.
  * Modified 2026-11-02: code versions with CRD's columns.
- * Modified 2026-11-10: master data (countries, subsidiary types).
+ * Modified 2026-11-10: master data (countries, subsidiary types); a requester's
+ * account reads only its own requests; request drafts.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.api;
@@ -36,6 +37,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -88,17 +90,41 @@ public class LocationCodeController {
 
     @GetMapping("/requests")
     public String requests() {
-        login.requireLogin();
-        return service.requestsJson();
+        return service.requestsJson(login.ownRequestsOnly());
     }
 
     @GetMapping("/requests/{id}")
     public String request(@PathVariable String id) {
-        login.requireLogin();
-        return service.requestJson(id);
+        return service.requestJson(id, login.ownRequestsOnly());
     }
 
-    /** Submits a request: {"actor": {"name", "role": "requester"}, "data": …}; returns it with its id (201). */
+    /**
+     * A requester's drafts, last saved first. With a login they are the
+     * account's; without, those of `owner`, the name the frontend gives.
+     */
+    @GetMapping("/drafts")
+    public String drafts(@RequestParam(required = false) String owner) {
+        return service.draftsJson(login.draftOwner(owner));
+    }
+
+    /** Saves a draft under an id the frontend chose: {"data": …}; returns {"id", "owner", "savedAt", "data"}. */
+    @PutMapping(value = "/drafts/{id}", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public String saveDraft(@PathVariable String id, @RequestParam(required = false) String owner,
+            @RequestBody String body) {
+        return service.saveDraft(id, login.draftOwner(owner), body);
+    }
+
+    /** Discards a draft. */
+    @DeleteMapping("/drafts/{id}")
+    public ResponseEntity<Void> deleteDraft(@PathVariable String id, @RequestParam(required = false) String owner) {
+        service.deleteDraft(id, login.draftOwner(owner));
+        return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Submits a request: {"actor": {"name", "role": "requester"}, "data": …, "draftId": …}; returns it with
+     * its id (201). `draftId`, optional, is the submitter's draft to remove with the submission.
+     */
     @PostMapping(value = "/requests", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> submit(@RequestBody String body) {
         return ResponseEntity.status(HttpStatus.CREATED).body(service.submit(withAccountActor(body)));
@@ -116,8 +142,7 @@ public class LocationCodeController {
 
     @GetMapping("/requests/{id}/changes")
     public String requestChanges(@PathVariable String id) {
-        login.requireLogin();
-        return service.changeLogJson("request", id);
+        return service.requestChangeLogJson(id, login.ownRequestsOnly());
     }
 
     /**
