@@ -193,6 +193,14 @@ class MasterDataServiceTest {
     }
 
     @Test
+    void aRequestWithoutCountryTakesThatOfThePlcItConcerns() {
+        String subsidiary = newCode("subsidiary", "BE", "01").replace("\"country\":\"BE\"", "\"country\":\"\"");
+        assertEquals("BE", submit(subsidiary).path("data").path("country").asText());
+        String ofUnknownCountry = subsidiary.replace("BE00438", "XX00438");
+        assertThrows(LocationCodeException.class, () -> service.submit(ofUnknownCountry));
+    }
+
+    @Test
     void aNewCodeTakesANumberFromTheCountrysRange() {
         saveCountry("BE", "{'plcRangeStart':100,'plcRangeEnd':200}");
         JsonNode positioned = positioned("BE");

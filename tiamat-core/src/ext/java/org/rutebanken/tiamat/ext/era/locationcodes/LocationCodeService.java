@@ -58,6 +58,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -146,7 +147,8 @@ public class LocationCodeService {
         if (!body.path("data").isObject()) {
             throw new LocationCodeException(BAD_REQUEST, "invalidRequest", "data must be an object");
         }
-        ObjectNode request = NewRequests.create(UUID.randomUUID().toString(), body.get("data"), actor, now());
+        ObjectNode request = NewRequests.create(UUID.randomUUID().toString(), withCountry(body.get("data")), actor,
+                now());
         RequestEntry entry = checkedRequest(null, request);
         requireMasterData(request.path("data"));
         inTransaction(() -> writeRequest(entry, request));
@@ -333,9 +335,30 @@ public class LocationCodeService {
         }
     }
 
+    /**
+     * A request for an SLC, or to change a PLC, may leave the country out (the
+     * frontend's form asks for it only when a PLC is created): it is then the
+     * prefix of the PLC concerned, the SLC's parent or the PLC to change.
+     */
+    private static JsonNode withCountry(JsonNode data) {
+        String country = JsonDocuments.text(data, "country");
+        if (country != null && !country.isBlank()) {
+            return data;
+        }
+        String concerned = JsonDocuments.text(data, PRIMARY.equals(JsonDocuments.text(data, "codeType"))
+                ? "targetCode" : "parentPrimaryCode");
+        String primaryCode = concerned == null ? "" : concerned.trim().toUpperCase(Locale.ROOT);
+        if (!LocationCodeRules.PRIMARY_CODE.matcher(primaryCode).matches()) {
+            return data;
+        }
+        ObjectNode completed = data.deepCopy();
+        completed.put("country", primaryCode.substring(0, COUNTRY_PREFIX_LENGTH));
+        return completed;
+    }
+
     /** Whether the request's country is not an EU Member State; a country no longer listed counts as outside. */
     private boolean isOutsideEu(JsonNode request) {
-        return repository.country(JsonDocuments.text(request.path("data"), "country"))
+        return repository.country(JsonDocuments.text(withCountry(request.path("data")), "country"))
                 .map(country -> !country.path("euMemberState").asBoolean())
                 .orElse(true);
     }
