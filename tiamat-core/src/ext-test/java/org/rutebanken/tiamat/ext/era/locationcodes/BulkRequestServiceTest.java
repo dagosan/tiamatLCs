@@ -19,25 +19,18 @@ package org.rutebanken.tiamat.ext.era.locationcodes;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
-import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.BulkRequests;
-import org.springframework.transaction.support.TransactionCallback;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Bulk requests through the service, over a register kept in memory (no database, no Knowledge Graph). */
+/** Bulk requests through the service, over the register kept in memory (no database, no Knowledge Graph). */
 class BulkRequestServiceTest {
 
     private static final String ANNA = "{'name':'Anna','role':'requester'}";
@@ -46,73 +39,14 @@ class BulkRequestServiceTest {
     private static final String DATA = "{'operation':'newCode','codeType':'primary','country':'SE',"
             + "'locationName':'Test','rinfLink':null}";
 
-    /** The requests and the year counters; a transaction that fails puts both back. */
-    private static final class MemoryRegister extends LocationCodeRepository {
-        private Map<String, String> requests = new LinkedHashMap<>();
-        private Map<Integer, Integer> sequences = new LinkedHashMap<>();
+    private final MemoryRepository register = new MemoryRepository();
+    private final LocationCodeService service = new LocationCodeService(register,
+            new MemoryRepository.NoTransaction(), null,
+            Clock.fixed(Instant.parse("2026-11-14T09:00:00Z"), ZoneOffset.UTC));
 
-        MemoryRegister() {
-            super(null);
-        }
-
-        @Override
-        public Optional<JsonNode> lockRequest(String id) {
-            return Optional.ofNullable(requests.get(id)).map(JsonDocuments::parse);
-        }
-
-        @Override
-        public List<JsonNode> lockBulkLines(String bulkId) {
-            return requests.values().stream().map(JsonDocuments::parse)
-                    .filter(request -> bulkId.equals(request.path("bulk").path("id").asText()))
-                    .sorted(Comparator.comparingInt(BulkRequests::lineOf))
-                    .toList();
-        }
-
-        @Override
-        public void insertRequest(RequestEntry request, String json) {
-            requests.put(request.id(), json);
-        }
-
-        @Override
-        public void updateRequest(RequestEntry request, String json) {
-            requests.put(request.id(), json);
-        }
-
-        @Override
-        public int nextReferenceSequence(int year) {
-            return sequences.merge(year, 1, Integer::sum);
-        }
-
-        @Override
-        public void log(String entity, String key, String operation, String principal, String json) {
-            // The change log is not looked at here.
-        }
+    private int requestCount() {
+        return JsonDocuments.parse(register.requestsJson()).size();
     }
-
-    private static final class MemoryTransactions extends TransactionTemplate {
-        private final MemoryRegister register;
-
-        MemoryTransactions(MemoryRegister register) {
-            this.register = register;
-        }
-
-        @Override
-        public <T> T execute(TransactionCallback<T> action) {
-            Map<String, String> requests = new LinkedHashMap<>(register.requests);
-            Map<Integer, Integer> sequences = new LinkedHashMap<>(register.sequences);
-            try {
-                return action.doInTransaction(null);
-            } catch (RuntimeException e) {
-                register.requests = requests;
-                register.sequences = sequences;
-                throw e;
-            }
-        }
-    }
-
-    private final MemoryRegister register = new MemoryRegister();
-    private final LocationCodeService service = new LocationCodeService(register, new MemoryTransactions(register),
-            null, Clock.fixed(Instant.parse("2026-11-14T09:00:00Z"), ZoneOffset.UTC));
 
     private static String json(String text) {
         return text.replace('\'', '"');
@@ -137,7 +71,7 @@ class BulkRequestServiceTest {
         assertEquals("stations.csv", lines.get(1).path("bulk").path("fileName").asText());
         assertEquals("submitted", lines.get(0).path("status").asText());
         assertEquals(lines.get(0).path("submittedAt").asText(), lines.get(1).path("submittedAt").asText());
-        assertEquals(2, register.requests.size());
+        assertEquals(2, requestCount());
     }
 
     @Test
@@ -147,7 +81,16 @@ class BulkRequestServiceTest {
                 + "{'line':3,'data':{'codeType':'primary'}}]}")));
         assertEquals(LocationCodeException.BAD_REQUEST, refused.status());
         assertTrue(refused.details().stream().allMatch(detail -> detail.startsWith("line 3: ")));
-        assertTrue(register.requests.isEmpty());
+        assertEquals(0, requestCount());
+    }
+
+    @Test
+    void aLineForACountryCodesAreNotAssignedForRefusesTheFile() {
+        LocationCodeException refused = refusal(() -> service.submitBulk(json("{'actor':" + ANNA
+                + ",'fileName':'stations.csv','lines':[{'line':2,'data':" + DATA + "},"
+                + "{'line':3,'data':" + DATA.replace("'SE'", "'XX'") + "}]}")));
+        assertEquals(List.of("line 3: codes are not assigned for country \"XX\""), refused.details());
+        assertEquals(0, requestCount());
     }
 
     @Test
@@ -166,11 +109,11 @@ class BulkRequestServiceTest {
         assertEquals("registered", lines.get(1).path("status").asText());
         assertEquals("2026-11-14T09:00:00.000Z", lines.get(0).path("registeredAt").asText());
         assertEquals(lines.get(0).path("registeredAt").asText(), lines.get(1).path("registeredAt").asText());
-        assertEquals(Map.of(2026, 1), register.sequences);
 
         LocationCodeException again = refusal(() -> service.registerBulk(bulkId, json("{'actor':" + CARL + "}")));
         assertEquals(LocationCodeException.CONFLICT, again.status());
-        assertEquals(Map.of(2026, 1), register.sequences);
+        // The refusal took no number: the next request gets the second of the year.
+        assertEquals(2, register.nextReferenceSequence(2026));
     }
 
     @Test
@@ -179,7 +122,7 @@ class BulkRequestServiceTest {
         LocationCodeException wrongRole = refusal(() -> service.registerBulk(bulkId, json("{'actor':" + VERA + "}")));
         assertEquals(LocationCodeException.UNPROCESSABLE, wrongRole.status());
         assertEquals(List.of("rinf_lc_blocked_wrong_role"), wrongRole.details());
-        assertTrue(register.sequences.isEmpty());
+        assertEquals(1, register.nextReferenceSequence(2026));
         assertEquals(LocationCodeException.NOT_FOUND,
                 refusal(() -> service.registerBulk("unknown", json("{'actor':" + CARL + "}"))).status());
     }

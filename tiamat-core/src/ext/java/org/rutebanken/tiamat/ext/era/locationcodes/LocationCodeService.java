@@ -16,6 +16,8 @@
  * Modified 2026-10-30: the register takes the workflow steps itself (submit,
  * takeStep) instead of storing documents the frontend computed.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-10: master data (countries, subsidiary types) and the
+ * rules that read them; a requester's own requests; request drafts.
  * Modified 2026-11-14: bulk requests (submitBulk, registerBulk).
  */
 
@@ -28,6 +30,7 @@ import org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeRules.Extension;
 import org.rutebanken.tiamat.ext.era.locationcodes.RegisterChecks.ParentState;
 import org.rutebanken.tiamat.ext.era.locationcodes.kg.KnowledgeGraphUnavailableException;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeVersion;
+import org.rutebanken.tiamat.ext.era.locationcodes.masterdata.MasterData;
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.Actor;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.AssignedCodes;
@@ -57,17 +60,20 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.BAD_REQUEST;
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.CONFLICT;
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.NOT_FOUND;
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.UNAVAILABLE;
 import static org.rutebanken.tiamat.ext.era.locationcodes.LocationCodeException.UNPROCESSABLE;
+import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.PRIMARY;
 
 /**
  * The register. It takes each workflow step itself: it checks that the step
@@ -90,6 +96,10 @@ public class LocationCodeService {
     private final RegisterChecks registerChecks;
     private final Clock clock;
 
+    private static final int COUNTRY_PREFIX_LENGTH = 2;
+    private static final Pattern DRAFT_ID = Pattern.compile("^[A-Za-z0-9-]{1,64}$");
+    private static final int MAX_DRAFTS_PER_OWNER = 100;
+
     public LocationCodeService(
             LocationCodeRepository repository, TransactionTemplate transactions, RegisterChecks registerChecks) {
         this(repository, transactions, registerChecks, Clock.systemUTC());
@@ -103,13 +113,88 @@ public class LocationCodeService {
         this.clock = clock;
     }
 
-    public String requestsJson() {
-        return repository.requestsJson();
+    /** Every request, or with `onlyOf` the requests that person submitted. */
+    public String requestsJson(Optional<String> onlyOf) {
+        return onlyOf.map(repository::requestsJsonOf).orElseGet(repository::requestsJson);
     }
 
-    public String requestJson(String id) {
-        return repository.requestDocument(id).orElseThrow(() ->
-                new LocationCodeException(NOT_FOUND, "requestNotFound", "no request " + id));
+    /** One request; with `onlyOf`, another person's request is answered as if it did not exist. */
+    public String requestJson(String id, Optional<String> onlyOf) {
+        String document = repository.requestDocument(id).orElseThrow(() -> noRequest(id));
+        boolean readable = onlyOf.isEmpty()
+                || Actor.isSamePerson(JsonDocuments.text(JsonDocuments.parse(document), "submittedBy"), onlyOf.get());
+        if (!readable) {
+            throw noRequest(id);
+        }
+        return document;
+    }
+
+    /** The saved versions of a request, readable as the request itself is. */
+    public String requestChangeLogJson(String id, Optional<String> onlyOf) {
+        requestJson(id, onlyOf);
+        return repository.changeLogJson("request", id);
+    }
+
+    private static LocationCodeException noRequest(String id) {
+        return new LocationCodeException(NOT_FOUND, "requestNotFound", "no request " + id);
+    }
+
+    /** One person's drafts, last saved first. */
+    public String draftsJson(String owner) {
+        return repository.draftsJson(owner);
+    }
+
+    /**
+     * Saves a request form not yet submitted: {"data": …}. The draft keeps its
+     * owner; another person's draft is answered as if it did not exist.
+     * Returns {"id", "owner", "savedAt", "data"}.
+     */
+    public String saveDraft(String id, String owner, String json) {
+        JsonNode body = JsonDocuments.parse(json);
+        if (!DRAFT_ID.matcher(id).matches()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidDraft",
+                    "a draft's id is 1 to 64 letters, digits or hyphens");
+        }
+        if (!body.path("data").isObject()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidDraft", "data must be an object");
+        }
+        ObjectNode draft = JsonDocuments.MAPPER.createObjectNode();
+        draft.put("id", id);
+        draft.put("owner", owner);
+        draft.put("savedAt", now());
+        draft.set("data", body.get("data"));
+        String document = JsonDocuments.write(draft);
+        inTransaction(() -> {
+            Optional<JsonNode> stored = repository.lockDraft(id);
+            if (stored.isPresent()) {
+                requireOwner(stored.get(), owner);
+            } else if (repository.draftCount(owner) >= MAX_DRAFTS_PER_OWNER) {
+                throw new LocationCodeException(UNPROCESSABLE, "tooManyDrafts",
+                        "at most " + MAX_DRAFTS_PER_OWNER + " drafts; submit or discard one first");
+            }
+            repository.saveDraft(id, owner, document);
+        });
+        return document;
+    }
+
+    /** Discards a draft of `owner`. */
+    public void deleteDraft(String id, String owner) {
+        inTransaction(() -> removeDraft(id, owner));
+    }
+
+    private void removeDraft(String id, String owner) {
+        requireOwner(repository.lockDraft(id).orElseThrow(() -> noDraft(id)), owner);
+        repository.deleteDraft(id);
+    }
+
+    private static void requireOwner(JsonNode draft, String owner) {
+        if (!Actor.isSamePerson(JsonDocuments.text(draft, "owner"), owner)) {
+            throw noDraft(JsonDocuments.text(draft, "id"));
+        }
+    }
+
+    private static LocationCodeException noDraft(String id) {
+        return new LocationCodeException(NOT_FOUND, "draftNotFound", "no draft " + id);
     }
 
     public String codesJson(String country, String parentPrimaryCode, String activeOn) {
@@ -130,8 +215,9 @@ public class LocationCodeService {
     }
 
     /**
-     * Procedure step 2: {"actor": …, "data": …}. The register gives the
-     * request its id and records the submission; returns the request.
+     * Procedure step 2: {"actor": …, "data": …, "draftId": …}. The register
+     * gives the request its id and records the submission, and removes the
+     * submitter's draft it was written from, if one is named; returns the request.
      */
     public String submit(String json) {
         JsonNode body = JsonDocuments.parse(json);
@@ -142,9 +228,20 @@ public class LocationCodeService {
         if (!body.path("data").isObject()) {
             throw new LocationCodeException(BAD_REQUEST, "invalidRequest", "data must be an object");
         }
-        ObjectNode request = NewRequests.create(UUID.randomUUID().toString(), body.get("data"), actor, now());
+        ObjectNode request = NewRequests.create(UUID.randomUUID().toString(), withCountry(body.get("data")), actor,
+                now());
         RequestEntry entry = checkedRequest(null, request);
-        inTransaction(() -> writeRequest(entry, request));
+        requireMasterData(request.path("data"));
+        String draftId = JsonDocuments.text(body, "draftId");
+        inTransaction(() -> {
+            writeRequest(entry, request);
+            // The draft the request was written from has done its work.
+            if (draftId != null && repository.lockDraft(draftId)
+                    .filter(draft -> Actor.isSamePerson(JsonDocuments.text(draft, "owner"), actor.name()))
+                    .isPresent()) {
+                repository.deleteDraft(draftId);
+            }
+        });
         return JsonDocuments.write(request);
     }
 
@@ -175,10 +272,18 @@ public class LocationCodeService {
         for (JsonNode line : lines) {
             int number = line.get("line").asInt();
             ObjectNode request = BulkRequests.asLine(
-                    NewRequests.create(UUID.randomUUID().toString(), line.get("data"), actor, now),
+                    NewRequests.create(UUID.randomUUID().toString(), withCountry(line.get("data")), actor, now),
                     bulkId, number, fileName);
             RequestEntry entry = JsonDocuments.request(request);
-            LocationCodeRules.requestProblems(entry).forEach(problem -> problems.add("line " + number + ": " + problem));
+            List<String> lineProblems = new ArrayList<>(LocationCodeRules.requestProblems(entry));
+            if (lineProblems.isEmpty()) {
+                try {
+                    requireMasterData(request.path("data"));
+                } catch (LocationCodeException refusal) {
+                    lineProblems.addAll(refusal.details());
+                }
+            }
+            lineProblems.forEach(problem -> problems.add("line " + number + ": " + problem));
             requests.add(request);
             entries.add(entry);
         }
@@ -219,7 +324,7 @@ public class LocationCodeService {
             for (JsonNode line : stored) {
                 String lineReference = BulkRequests.lineReference(reference, BulkRequests.lineOf(line));
                 ObjectNode updated = RequestTransitions.apply(
-                        line, new Step(WorkflowSteps.REGISTER, actor, noPayload, now, lineReference));
+                        line, new Step(WorkflowSteps.REGISTER, actor, noPayload, now, lineReference, isOutsideEu(line)));
                 writeRequest(checkedRequest(JsonDocuments.text(line, "id"), updated), updated);
                 registered.add(updated);
             }
@@ -268,7 +373,8 @@ public class LocationCodeService {
             String reference = WorkflowSteps.REGISTER.equals(step)
                     ? NewRequests.reference(today.getYear(), repository.nextReferenceSequence(today.getYear()))
                     : null;
-            ObjectNode updated = RequestTransitions.apply(stored, new Step(step, actor, payload, now, reference));
+            ObjectNode updated = RequestTransitions.apply(stored,
+                    new Step(step, actor, payload, now, reference, isOutsideEu(stored)));
             RequestEntry entry = checkedRequest(pathId, updated);
             ArrayNode codes = JsonDocuments.MAPPER.createArrayNode();
             if (WorkflowSteps.PUBLISH.equals(step)) {
@@ -358,9 +464,132 @@ public class LocationCodeService {
         if (problems.isEmpty() && creation && repository.hasCode(key)) {
             problems.add(key + " is already in the register");
         }
+        if (problems.isEmpty()) {
+            problems.addAll(rangeProblems(request.path("data"), key));
+        }
         if (!problems.isEmpty()) {
             throw new LocationCodeException(UNPROCESSABLE, "codeNotAssignable", problems);
         }
+    }
+
+    /** A new PLC takes a number from its country's range (BR-10); an existing code is registered as it is. */
+    private List<String> rangeProblems(JsonNode data, String key) {
+        boolean newPrimary = "newCode".equals(JsonDocuments.text(data, "operation"))
+                && PRIMARY.equals(JsonDocuments.text(data, "codeType"));
+        Optional<JsonNode> country = repository.country(JsonDocuments.text(data, "country"));
+        if (!newPrimary || country.isEmpty()) {
+            return List.of();
+        }
+        int locationNumber = Integer.parseInt(key.substring(COUNTRY_PREFIX_LENGTH));
+        if (MasterData.inRange(country.get(), locationNumber)) {
+            return List.of();
+        }
+        return List.of(key + " is outside the range for new codes of " + JsonDocuments.text(data, "country") + " ("
+                + country.get().path("plcRangeStart").asInt() + " to " + country.get().path("plcRangeEnd").asInt()
+                + ")");
+    }
+
+    /**
+     * A request names a country the register assigns codes for, and a new SLC a
+     * subsidiary type, both valid today (BR-08).
+     */
+    private void requireMasterData(JsonNode data) {
+        LocalDate today = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC);
+        List<String> problems = new ArrayList<>();
+        String country = JsonDocuments.text(data, "country");
+        if (repository.country(country).filter(stored -> MasterData.validOn(stored, today)).isEmpty()) {
+            problems.add("codes are not assigned for country \"" + country + "\"");
+        }
+        boolean newSubsidiary = RequestRouting.isCreation(JsonDocuments.text(data, "operation"))
+                && !PRIMARY.equals(JsonDocuments.text(data, "codeType"));
+        String type = JsonDocuments.text(data, "subsidiaryTypeCode");
+        if (newSubsidiary
+                && repository.subsidiaryType(type).filter(stored -> MasterData.validOn(stored, today)).isEmpty()) {
+            problems.add("\"" + type + "\" is not a subsidiary location code type in use");
+        }
+        if (!problems.isEmpty()) {
+            throw new LocationCodeException(UNPROCESSABLE, "invalidRequest", problems);
+        }
+    }
+
+    /**
+     * A request for an SLC, or to change a PLC, may leave the country out (the
+     * frontend's form asks for it only when a PLC is created): it is then the
+     * prefix of the PLC concerned, the SLC's parent or the PLC to change.
+     */
+    private static JsonNode withCountry(JsonNode data) {
+        String country = JsonDocuments.text(data, "country");
+        if (country != null && !country.isBlank()) {
+            return data;
+        }
+        String concerned = JsonDocuments.text(data, PRIMARY.equals(JsonDocuments.text(data, "codeType"))
+                ? "targetCode" : "parentPrimaryCode");
+        String primaryCode = concerned == null ? "" : concerned.trim().toUpperCase(Locale.ROOT);
+        if (!LocationCodeRules.PRIMARY_CODE.matcher(primaryCode).matches()) {
+            return data;
+        }
+        ObjectNode completed = data.deepCopy();
+        completed.put("country", primaryCode.substring(0, COUNTRY_PREFIX_LENGTH));
+        return completed;
+    }
+
+    /** Whether the request's country is not an EU Member State; a country no longer listed counts as outside. */
+    private boolean isOutsideEu(JsonNode request) {
+        return repository.country(JsonDocuments.text(withCountry(request.path("data")), "country"))
+                .map(country -> !country.path("euMemberState").asBoolean())
+                .orElse(true);
+    }
+
+    public String countriesJson(String validOn) {
+        if (validOn != null) {
+            requireDate(validOn, "validOn");
+        }
+        return repository.countriesJson(validOn);
+    }
+
+    public String subsidiaryTypesJson(String validOn) {
+        if (validOn != null) {
+            requireDate(validOn, "validOn");
+        }
+        return repository.subsidiaryTypesJson(validOn);
+    }
+
+    /** Adds or replaces a country (FR-27); returns it as stored. */
+    public String saveCountry(String isoCode, String json) {
+        ObjectNode country = MasterData.country(JsonDocuments.parse(json));
+        List<String> problems = new ArrayList<>(MasterData.countryProblems(country));
+        if (!isoCode.equals(country.path("isoCode").asText())) {
+            problems.add("isoCode in the body differs from the URL (" + isoCode + ")");
+        }
+        return savedMasterData("country", isoCode, country, problems, () -> repository.saveCountry(country));
+    }
+
+    /** Adds or replaces a subsidiary location code type (FR-27); returns it as stored. */
+    public String saveSubsidiaryType(String code, String json) {
+        ObjectNode type = MasterData.subsidiaryType(JsonDocuments.parse(json));
+        List<String> problems = new ArrayList<>(MasterData.subsidiaryTypeProblems(type));
+        if (!code.equals(type.path("code").asText())) {
+            problems.add("code in the body differs from the URL (" + code + ")");
+        }
+        return savedMasterData("subsidiaryType", code, type, problems, () -> repository.saveSubsidiaryType(type));
+    }
+
+    private String savedMasterData(String entity, String key, ObjectNode document, List<String> problems,
+            Runnable save) {
+        if (!problems.isEmpty()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidMasterData", problems);
+        }
+        String json = JsonDocuments.write(document);
+        inTransaction(() -> {
+            try {
+                save.run();
+            } catch (DuplicateKeyException e) {
+                throw new LocationCodeException(CONFLICT, "duplicateUicCode",
+                        "another country already has UIC code " + document.path("uicCode").asText());
+            }
+            repository.log(entity, key, "save", principal(), json);
+        });
+        return json;
     }
 
     /** The code versions a publication creates or ends, with the SLCs it closes. */

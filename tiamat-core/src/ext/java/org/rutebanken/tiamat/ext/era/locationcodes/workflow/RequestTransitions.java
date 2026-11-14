@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-30.
+ * Modified 2026-11-10: routing uses the step's outsideEu (country master data).
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.workflow;
@@ -86,7 +87,7 @@ public final class RequestTransitions {
             case COMPLETE_VALIDATION -> completeValidation(request, step);
             case CONFIRM_POSITION -> {
                 JsonNode link = hasValue(payload, "link") ? payload.get("link") : request.path("data").path("rinfLink");
-                request.put("status", RequestRouting.statusAfterHarmonisation(request));
+                request.put("status", RequestRouting.statusAfterHarmonisation(request, step.outsideEu()));
                 request.set("rinfPosition", position("confirmed", link, step));
                 ((ObjectNode) request.get("data")).set("rinfLink", link.isMissingNode() ? NullNode.getInstance() : link);
             }
@@ -162,7 +163,7 @@ public final class RequestTransitions {
     }
 
     private static void completeValidation(ObjectNode request, Step step) {
-        request.put("status", RequestRouting.statusAfterValidation(request));
+        request.put("status", RequestRouting.statusAfterValidation(request, step.outsideEu()));
         JsonNode recommendation = step.payload().path("recommendation");
         request.set("recommendation", recommendation.isObject() ? recommendation.deepCopy() : NullNode.getInstance());
         JsonNode data = request.path("data");

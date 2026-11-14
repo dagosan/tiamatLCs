@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-11-01.
+ * Modified 2026-11-10: a requester's account reads only its own requests and drafts.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.auth;
@@ -96,6 +97,40 @@ public class EraLogin {
                     "the account does not hold the role " + role);
         }
         return new Actor(user.name(), role);
+    }
+
+    /**
+     * Whose requests alone the caller may read (LCMS specification 2.2: a
+     * requester views own requests). Empty when the caller reads every request:
+     * an account with an Agency role, or anyone when no login is required
+     * (then the frontend shows a requester only their own).
+     */
+    public Optional<String> ownRequestsOnly() {
+        if (!required) {
+            return Optional.empty();
+        }
+        LoggedIn user = loggedIn();
+        return readsEveryRequest(user.roles()) ? Optional.empty() : Optional.of(user.name());
+    }
+
+    /** Agency roles handle every request; a requester's account holds none of them. */
+    public static boolean readsEveryRequest(List<String> roles) {
+        return roles.stream().anyMatch(role -> Actor.ROLES.contains(role) && !Actor.REQUESTER.equals(role));
+    }
+
+    /**
+     * Whose drafts the caller works on: the account's, which must be a
+     * requester's, or without a login the name the frontend gives.
+     */
+    public String draftOwner(String namedByFrontend) {
+        if (required) {
+            return actorFor(Actor.REQUESTER).name();
+        }
+        if (namedByFrontend == null || namedByFrontend.isBlank()) {
+            throw new LocationCodeException(LocationCodeException.BAD_REQUEST, "invalidActor",
+                    "say whose drafts: the owner's name is empty");
+        }
+        return namedByFrontend.trim();
     }
 
     /** Refuses a request without a login, when a login is required. */
