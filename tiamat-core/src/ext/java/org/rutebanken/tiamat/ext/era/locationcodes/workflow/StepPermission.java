@@ -13,6 +13,7 @@
  * limitations under the Licence.
  *
  * Added for the ERA Location Code Manager, 2026-10-30.
+ * Modified 2026-11-14: a line of a bulk request is not registered on its own.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.workflow;
@@ -30,6 +31,7 @@ import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestDocume
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowSteps.ASK_FOR_REVIEW;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowSteps.ASSIGN;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowSteps.COMPLETE_VALIDATION;
+import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowSteps.REGISTER;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowSteps.REJECT;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowSteps.REVISE_DECISION;
 import static org.rutebanken.tiamat.ext.era.locationcodes.workflow.WorkflowSteps.UPHOLD_DECISION;
@@ -85,6 +87,9 @@ public final class StepPermission {
 
     private static String stepCondition(JsonNode request, String step, Actor actor, LocalDate today) {
         switch (step) {
+            case REGISTER:
+                // The lines of a bulk request share one reference and one T0.
+                return BulkRequests.isLine(request) ? BulkRequests.REGISTER_WITH_BULK : null;
             case COMPLETE_VALIDATION:
                 if (!hasValue(request, "checksRunAt")) {
                     return RUN_CHECKS;

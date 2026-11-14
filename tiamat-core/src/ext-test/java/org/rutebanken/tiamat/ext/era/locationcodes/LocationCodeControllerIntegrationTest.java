@@ -15,6 +15,7 @@
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-10-30: requests change through submit and steps, not raw saves.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-14: bulk requests.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -153,5 +154,49 @@ public class LocationCodeControllerIntegrationTest extends TiamatIntegrationTest
                 new HttpEntity<>("{\"id\":\"" + id + "\",\"status\":\"published\"}", headers), String.class);
         assertThat(put.getStatusCode().is2xxSuccessful()).isFalse();
         assertThat(eventCount(id)).isEqualTo(1);
+    }
+
+    @Test
+    public void submitsABulkRequestAndRegistersItsLinesTogether() {
+        String lines = "[{\"line\":3,\"data\":" + DATA + "},{\"line\":2,\"data\":" + DATA + "}]";
+        ResponseEntity<String> created = post("/requests/bulk",
+                "{\"actor\":" + ANNA + ",\"fileName\":\"stations.csv\",\"lines\":" + lines + "}");
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        JsonNode submitted = JsonDocuments.parse(created.getBody());
+        assertThat(submitted).hasSize(2);
+        assertThat(submitted.get(0).get("bulk").get("line").asInt()).isEqualTo(2);
+        String bulkId = submitted.get(0).get("bulk").get("id").asText();
+        assertThat(submitted.get(1).get("bulk").get("id").asText()).isEqualTo(bulkId);
+
+        ResponseEntity<String> alone = step(submitted.get(0).get("id").asText(), "register", CARL, "{}");
+        assertThat(alone.getStatusCode().value()).isEqualTo(UNPROCESSABLE);
+        assertThat(alone.getBody()).contains("rinf_lc_blocked_bulk_register");
+
+        ResponseEntity<String> wrongRole = post("/requests/bulk/" + bulkId + "/register", "{\"actor\":" + VERA + "}");
+        assertThat(wrongRole.getStatusCode().value()).isEqualTo(UNPROCESSABLE);
+
+        ResponseEntity<String> registered = post("/requests/bulk/" + bulkId + "/register", "{\"actor\":" + CARL + "}");
+        assertThat(registered.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode registeredLines = JsonDocuments.parse(registered.getBody());
+        String firstReference = registeredLines.get(0).get("reference").asText();
+        assertThat(firstReference).matches("LC-\\d{4}-\\d{4}/2");
+        assertThat(registeredLines.get(1).get("reference").asText())
+                .isEqualTo(firstReference.replaceAll("/2$", "/3"));
+        assertThat(registeredLines.get(1).get("registeredAt").asText())
+                .isEqualTo(registeredLines.get(0).get("registeredAt").asText());
+
+        ResponseEntity<String> again = post("/requests/bulk/" + bulkId + "/register", "{\"actor\":" + CARL + "}");
+        assertThat(again.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(post("/requests/bulk/unknown/register", "{\"actor\":" + CARL + "}").getStatusCode())
+                .isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    @Test
+    public void refusesABulkRequestWholeWhenALineIsNotARequest() {
+        String lines = "[{\"line\":2,\"data\":" + DATA + "},{\"line\":3,\"data\":{\"codeType\":\"primary\"}}]";
+        ResponseEntity<String> refused = post("/requests/bulk",
+                "{\"actor\":" + ANNA + ",\"fileName\":\"stations.csv\",\"lines\":" + lines + "}");
+        assertThat(refused.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(refused.getBody()).contains("line 3: ");
     }
 }

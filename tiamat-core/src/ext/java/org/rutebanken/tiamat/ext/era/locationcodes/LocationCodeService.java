@@ -16,6 +16,7 @@
  * Modified 2026-10-30: the register takes the workflow steps itself (submit,
  * takeStep) instead of storing documents the frontend computed.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-14: bulk requests (submitBulk, registerBulk).
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -30,6 +31,7 @@ import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.CodeV
 import org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.RequestEntry;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.Actor;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.AssignedCodes;
+import org.rutebanken.tiamat.ext.era.locationcodes.workflow.BulkRequests;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.NewRequests;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.Publication;
 import org.rutebanken.tiamat.ext.era.locationcodes.workflow.RequestRouting;
@@ -144,6 +146,85 @@ public class LocationCodeService {
         RequestEntry entry = checkedRequest(null, request);
         inTransaction(() -> writeRequest(entry, request));
         return JsonDocuments.write(request);
+    }
+
+    /**
+     * A bulk request (LCMS specification FR-08): {"actor", "fileName",
+     * "lines": [{"line", "data"}]}. Every line becomes a request of its own,
+     * all with the same bulk id and submission moment; either all are
+     * recorded or none. Returns the lines, in the order of the file.
+     */
+    public String submitBulk(String json) {
+        JsonNode body = JsonDocuments.parse(json);
+        Actor actor = Actor.fromJson(body.path("actor"));
+        if (!Actor.REQUESTER.equals(actor.role())) {
+            throw refused(StepPermission.WRONG_ROLE);
+        }
+        List<String> problems = BulkRequests.submissionProblems(body);
+        if (!problems.isEmpty()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidRequest", problems);
+        }
+        String now = now();
+        String bulkId = UUID.randomUUID().toString();
+        String fileName = JsonDocuments.text(body, "fileName").trim();
+        List<JsonNode> lines = new ArrayList<>();
+        body.get("lines").forEach(lines::add);
+        lines.sort((first, second) -> Integer.compare(first.get("line").asInt(), second.get("line").asInt()));
+        List<ObjectNode> requests = new ArrayList<>();
+        List<RequestEntry> entries = new ArrayList<>();
+        for (JsonNode line : lines) {
+            int number = line.get("line").asInt();
+            ObjectNode request = BulkRequests.asLine(
+                    NewRequests.create(UUID.randomUUID().toString(), line.get("data"), actor, now),
+                    bulkId, number, fileName);
+            RequestEntry entry = JsonDocuments.request(request);
+            LocationCodeRules.requestProblems(entry).forEach(problem -> problems.add("line " + number + ": " + problem));
+            requests.add(request);
+            entries.add(entry);
+        }
+        if (!problems.isEmpty()) {
+            throw new LocationCodeException(BAD_REQUEST, "invalidRequest", problems);
+        }
+        inTransaction(() -> {
+            for (int index = 0; index < requests.size(); index++) {
+                writeRequest(entries.get(index), requests.get(index));
+            }
+        });
+        return JsonDocuments.write(JsonDocuments.MAPPER.createArrayNode().addAll(requests));
+    }
+
+    /**
+     * Registers a bulk request: {"actor"}. Every line gets the same number
+     * from the year's sequence, ending with its line in the file
+     * ("LC-2026-0007/3"), and the same T0. All lines must still be as
+     * submitted; a line is never registered on its own. Returns the lines.
+     */
+    public String registerBulk(String bulkId, String json) {
+        JsonNode body = JsonDocuments.parse(json);
+        Actor actor = Actor.fromJson(body.path("actor"));
+        JsonNode noPayload = JsonDocuments.MAPPER.createObjectNode();
+        return inTransactionReturning(() -> {
+            List<JsonNode> stored = repository.lockBulkLines(bulkId);
+            if (stored.isEmpty()) {
+                throw new LocationCodeException(NOT_FOUND, "bulkRequestNotFound", "no bulk request " + bulkId);
+            }
+            BulkRequests.registrationRefusal(stored, actor).ifPresent(reason -> {
+                throw refused(reason);
+            });
+            Instant instant = clock.instant();
+            String now = ISO_INSTANT_MILLIS.format(instant);
+            int year = LocalDate.ofInstant(instant, ZoneOffset.UTC).getYear();
+            String reference = NewRequests.reference(year, repository.nextReferenceSequence(year));
+            ArrayNode registered = JsonDocuments.MAPPER.createArrayNode();
+            for (JsonNode line : stored) {
+                String lineReference = BulkRequests.lineReference(reference, BulkRequests.lineOf(line));
+                ObjectNode updated = RequestTransitions.apply(
+                        line, new Step(WorkflowSteps.REGISTER, actor, noPayload, now, lineReference));
+                writeRequest(checkedRequest(JsonDocuments.text(line, "id"), updated), updated);
+                registered.add(updated);
+            }
+            return JsonDocuments.write(registered);
+        });
     }
 
     /**
@@ -509,9 +590,10 @@ public class LocationCodeService {
         Map<Integer, Integer> highest = new HashMap<>();
         for (RequestEntry request : requests) {
             String reference = request.reference();
-            if (reference != null && reference.matches("^LC-\\d{4}-\\d+$")) {
+            if (reference != null && reference.matches("^LC-\\d{4}-\\d+(/\\d+)?$")) {
                 String[] parts = reference.split("-");
-                highest.merge(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]), Math::max);
+                // A bulk line's reference ends with its line, "LC-2026-0007/3".
+                highest.merge(Integer.parseInt(parts[1]), Integer.parseInt(parts[2].split("/")[0]), Math::max);
             }
         }
         highest.forEach(repository::raiseReferenceSequence);

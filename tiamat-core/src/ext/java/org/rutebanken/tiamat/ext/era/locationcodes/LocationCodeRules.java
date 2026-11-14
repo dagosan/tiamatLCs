@@ -15,6 +15,7 @@
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-10-30: the code patterns are public, for the workflow package.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-14: a request without a status, code type or operation is refused, not an error.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -28,6 +29,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import static org.rutebanken.tiamat.ext.era.locationcodes.model.LocationCodeModel.ASSET;
@@ -124,13 +126,13 @@ public final class LocationCodeRules {
         if (isBlank(request.id())) {
             problems.add("id is empty");
         }
-        if (!STATUSES.contains(request.status())) {
+        if (!isOneOf(STATUSES, request.status())) {
             problems.add("unknown status \"" + request.status() + "\"");
         }
-        if (!CODE_TYPES.contains(request.codeType())) {
+        if (!isOneOf(CODE_TYPES, request.codeType())) {
             problems.add("data.codeType must be primary or subsidiary");
         }
-        if (!OPERATIONS.contains(request.operation())) {
+        if (!isOneOf(OPERATIONS, request.operation())) {
             problems.add("unknown data.operation \"" + request.operation() + "\"");
         }
         if (isBlank(request.country())) {
@@ -169,6 +171,11 @@ public final class LocationCodeRules {
             return Extension.STALE;
         }
         return incoming.size() == stored.size() ? Extension.SAME : Extension.ADDS;
+    }
+
+    /** Set.of(…) refuses to be asked about null. */
+    private static boolean isOneOf(Set<String> values, String value) {
+        return value != null && values.contains(value);
     }
 
     static boolean isBlank(String value) {

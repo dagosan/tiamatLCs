@@ -14,6 +14,7 @@
  *
  * Added for the ERA Location Code Manager, 2026-10-29.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-14: the lines of a bulk request.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes;
@@ -41,6 +42,14 @@ public class LocationCodeRepository {
     public Optional<JsonNode> lockRequest(String id) {
         return first(jdbc.queryForList(
                 "SELECT document::text FROM ext_era_lc_request WHERE id = ? FOR UPDATE", String.class, id));
+    }
+
+    /** The lines of a bulk request in the order of the file, locked until the transaction ends. */
+    public List<JsonNode> lockBulkLines(String bulkId) {
+        return jdbc.queryForList("SELECT document::text FROM ext_era_lc_request "
+                        + "WHERE document -> 'bulk' ->> 'id' = ? "
+                        + "ORDER BY (document -> 'bulk' ->> 'line')::int, id FOR UPDATE", String.class, bulkId)
+                .stream().map(JsonDocuments::parse).toList();
     }
 
     public Optional<String> requestDocument(String id) {

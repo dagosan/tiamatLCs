@@ -1,6 +1,7 @@
 <!-- Added for the ERA Location Code Manager, 2026-10-29. Licensed under the EUPL 1.2.
      Modified 2026-10-30: the register takes the workflow steps itself; Docker image (Dockerfile.era).
-     Modified 2026-11-02: the register holds code versions with CRD's columns (migration V2). -->
+     Modified 2026-11-02: the register holds code versions with CRD's columns (migration V2).
+     Modified 2026-11-14: bulk requests. -->
 
 # ERA Location Code Manager: the register in Tiamat
 
@@ -67,6 +68,34 @@ out yet: the results of the technical checks (they need the frontend's KG
 lookups) and the value to assign. Their form is checked here, and the value is
 checked again against the register and the KG when it is published.
 
+## Bulk requests (since 2026-11-14)
+
+A bulk request (LCMS specification FR-08) is the accepted lines of one CSV
+file, sent as one request. The frontend checks the file (abzuKG
+`src/rinf/locationCodes/bulk/`); the register receives the accepted lines.
+
+- **Submission** (`POST /requests/bulk`): every line becomes a request of its
+  own, with `"bulk": {"id", "line", "fileName"}`: the same bulk id (given by
+  the register) and the same submission moment for all, `line` being the line
+  number in the file (the header is line 1). At most 500 lines; the lines are
+  recorded together or not at all, and a line that is not a valid request
+  refuses the whole submission (400 `invalidRequest`, details `line N: …`).
+- **Registration** (`POST /requests/bulk/{bulkId}/register`): by a code
+  administrator, while every line is still as submitted. The lines get one
+  number from the year's sequence and one T0; a line's reference is that
+  reference and its line, `LC-2026-0007/3`. Refusals as for a step: 409
+  `actionNotAvailable` (`rinf_lc_blocked_wrong_status`), 422 `actionNotAllowed`
+  (`rinf_lc_blocked_wrong_role`, `_four_eyes`), 404 `bulkRequestNotFound`.
+- A line is never registered on its own: the `register` action on a line is
+  refused (422 `actionNotAllowed`, `rinf_lc_blocked_bulk_register`).
+- After registration each line goes through the ordinary workflow, action by
+  action, with its own checks, position, decision and history. The frontend's
+  "steps on all lines" are these actions sent line by line.
+
+No table changed: the bulk part lives in the request's JSON document. The
+rules are in `workflow/BulkRequests.java`, the same as the frontend's
+`bulk/bulkRequests.ts` and `store/browserBulk.ts`.
+
 ## The register's own checks
 
 Whatever the step, a save is refused if it would break the register:
@@ -132,6 +161,8 @@ All under `/era/v1/location-codes`, JSON, the frontend's own documents.
 | `GET /requests` | all requests, oldest first |
 | `GET /requests/{id}` | one request |
 | `POST /requests` | submit: `{"actor": {"name", "role": "requester"}, "data": …}`; 201 with the request and its id |
+| `POST /requests/bulk` | submit a bulk request: `{"actor": {"name", "role": "requester"}, "fileName": "stations.csv", "lines": [{"line": 2, "data": …}]}`; 201 with the lines, each a request |
+| `POST /requests/bulk/{bulkId}/register` | register all its lines: `{"actor": {"name", "role": "codeAdministrator"}}`; 200 with the lines |
 | `POST /requests/{id}/actions` | one step: `{"action": "register", "actor": {"name", "role"}, "payload": {…}, "expectedEventCount": 1}`; 200 with `{"request": …, "codes": [ code versions created or ended ]}` |
 | `GET /requests/{id}/changes` | every saved version, with time and user |
 | `GET /codes?country=BE&parentPrimaryCode=BE00438&activeOn=2026-10-29` | the register, every version (filters optional; `activeOn` keeps the versions valid that day) |

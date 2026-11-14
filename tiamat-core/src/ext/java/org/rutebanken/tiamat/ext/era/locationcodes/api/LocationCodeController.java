@@ -18,6 +18,7 @@
  * Modified 2026-11-01: with era.location-codes.login.required, steps are taken
  * by the logged-in account (EraLogin) and requests need a login.
  * Modified 2026-11-02: code versions with CRD's columns.
+ * Modified 2026-11-14: bulk requests.
  */
 
 package org.rutebanken.tiamat.ext.era.locationcodes.api;
@@ -100,6 +101,21 @@ public class LocationCodeController {
     @PostMapping(value = "/requests", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<String> submit(@RequestBody String body) {
         return ResponseEntity.status(HttpStatus.CREATED).body(service.submit(withAccountActor(body)));
+    }
+
+    /**
+     * Submits a bulk request: {"actor", "fileName", "lines": [{"line", "data"}]};
+     * returns its lines, each a request with {"bulk": {"id", "line", "fileName"}} (201).
+     */
+    @PostMapping(value = "/requests/bulk", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<String> submitBulk(@RequestBody String body) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(service.submitBulk(withAccountActor(body)));
+    }
+
+    /** Registers every line of a bulk request under one reference and one T0: {"actor"}; returns the lines. */
+    @PostMapping(value = "/requests/bulk/{bulkId}/register", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public String registerBulk(@PathVariable String bulkId, @RequestBody String body) {
+        return service.registerBulk(bulkId, withAccountActor(body));
     }
 
     /**
